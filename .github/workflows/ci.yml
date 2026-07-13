@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show Swift version
+        run: swift --version
+      - name: Run tests
+        run: swift test
+      - name: Validate metadata and scripts
+        run: |
+          plutil -lint Resources/Info.plist
+          zsh -n scripts/build-app.sh
+          zsh -n scripts/package-release.sh
+      - name: Build Universal release binary
+        run: swift build -c release --arch arm64 --arch x86_64
+      - name: Verify architectures
+        run: |
+          BIN_DIR="$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)"
+          ARCHS="$(lipo -archs "$BIN_DIR/CloudLyrics")"
+          [[ "$ARCHS" == *arm64* ]]
+          [[ "$ARCHS" == *x86_64* ]]
