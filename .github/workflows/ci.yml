@@ -24,10 +24,15 @@ jobs:
           zsh -n scripts/build-app.sh
           zsh -n scripts/package-release.sh
       - name: Build Universal release binary
-        run: swift build -c release --arch arm64 --arch x86_64
+        run: |
+          swift build -c release --arch arm64 --scratch-path .build/release-arm64
+          swift build -c release --arch x86_64 --scratch-path .build/release-x86_64
       - name: Verify architectures
         run: |
-          BIN_DIR="$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)"
-          ARCHS="$(lipo -archs "$BIN_DIR/CloudLyrics")"
+          ARM_BIN_DIR="$(swift build -c release --arch arm64 --scratch-path .build/release-arm64 --show-bin-path)"
+          INTEL_BIN_DIR="$(swift build -c release --arch x86_64 --scratch-path .build/release-x86_64 --show-bin-path)"
+          mkdir -p .build/universal
+          lipo -create "$ARM_BIN_DIR/CloudLyrics" "$INTEL_BIN_DIR/CloudLyrics" -output .build/universal/CloudLyrics
+          ARCHS="$(lipo -archs .build/universal/CloudLyrics)"
           [[ "$ARCHS" == *arm64* ]]
           [[ "$ARCHS" == *x86_64* ]]

@@ -29,11 +29,15 @@ if [[ -e "$ZIP" || -e "$CHECKSUM" ]]; then
 fi
 
 cd "$ROOT"
-swift build -c release --arch arm64 --arch x86_64
-BIN_DIR="$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)"
+ARM_SCRATCH="$ROOT/.build/release-arm64"
+INTEL_SCRATCH="$ROOT/.build/release-x86_64"
+swift build -c release --arch arm64 --scratch-path "$ARM_SCRATCH"
+swift build -c release --arch x86_64 --scratch-path "$INTEL_SCRATCH"
+ARM_BIN_DIR="$(swift build -c release --arch arm64 --scratch-path "$ARM_SCRATCH" --show-bin-path)"
+INTEL_BIN_DIR="$(swift build -c release --arch x86_64 --scratch-path "$INTEL_SCRATCH" --show-bin-path)"
 
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources" "$OUTPUT_DIR"
-COPYFILE_DISABLE=1 cp "$BIN_DIR/CloudLyrics" "$CONTENTS/MacOS/CloudLyrics"
+lipo -create "$ARM_BIN_DIR/CloudLyrics" "$INTEL_BIN_DIR/CloudLyrics" -output "$CONTENTS/MacOS/CloudLyrics"
 COPYFILE_DISABLE=1 cp "$ROOT/Resources/Info.plist" "$CONTENTS/Info.plist"
 COPYFILE_DISABLE=1 cp "$ROOT/Resources/AppIcon.icns" "$CONTENTS/Resources/AppIcon.icns"
 chmod +x "$CONTENTS/MacOS/CloudLyrics"
