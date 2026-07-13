@@ -40,7 +40,7 @@ chmod +x "$CONTENTS/MacOS/CloudLyrics"
 codesign --force --deep --sign - --identifier "$IDENTIFIER" "$APP"
 
 COPYFILE_DISABLE=1 ditto -c -k --keepParent --norsrc "$APP" "$ZIP"
-shasum -a 256 "$ZIP" > "$CHECKSUM"
+(cd "$OUTPUT_DIR" && shasum -a 256 "$ZIP:t") > "$CHECKSUM"
 
 print "$ZIP"
 print "$CHECKSUM"
