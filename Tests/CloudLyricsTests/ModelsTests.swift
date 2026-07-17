@@ -2,6 +2,75 @@ import XCTest
 @testable import CloudLyrics
 
 final class ModelsTests: XCTestCase {
+    func testPlayerNamespacedKeysAndLegacyDecode() throws {
+        let netease = TrackIdentity(title: "Same", artist: "Singer", sourceID: "123", player: .netease)
+        let kugou = TrackIdentity(title: "Same", artist: "Singer", sourceID: "123", player: .kugou)
+        XCTAssertEqual(netease.normalizedKey, "netease:123")
+        XCTAssertEqual(kugou.normalizedKey, "kugou:123")
+        let legacy = try JSONDecoder().decode(TrackIdentity.self, from: Data(#"{"title":"Old","artist":"Artist","sourceID":"9"}"#.utf8))
+        XCTAssertEqual(legacy.player, .netease)
+        XCTAssertEqual(legacy.normalizedKey, "netease:9")
+    }
+
+    func testAutomaticPlayerSelectionFollowsActiveAndKeepsPrevious() {
+        XCTAssertEqual(AutomaticPlayerSelection.choose(activeBundleIdentifier: PlayerBundleIdentifiers.kugou, previous: .netease, neteaseRunning: true, kugouRunning: true), .kugou)
+        XCTAssertEqual(AutomaticPlayerSelection.choose(activeBundleIdentifier: PlayerBundleIdentifiers.netease, previous: .kugou, neteaseRunning: true, kugouRunning: true), .netease)
+        XCTAssertEqual(AutomaticPlayerSelection.choose(activeBundleIdentifier: nil, previous: .kugou, neteaseRunning: true, kugouRunning: true), .kugou)
+        XCTAssertEqual(AutomaticPlayerSelection.choose(activeBundleIdentifier: nil, previous: .netease, neteaseRunning: true, kugouRunning: true, kugouPlaying: true), .kugou)
+        XCTAssertEqual(AutomaticPlayerSelection.choose(activeBundleIdentifier: nil, previous: nil, neteaseRunning: false, kugouRunning: true), .kugou)
+        XCTAssertNil(AutomaticPlayerSelection.choose(activeBundleIdentifier: nil, previous: .kugou, neteaseRunning: false, kugouRunning: false))
+    }
+
+    func testFrontmostPlayerIsUsedOnlyAsFallback() {
+        XCTAssertEqual(
+            AutomaticPlayerSelection.choose(
+                activeBundleIdentifier: nil,
+                frontmostBundleIdentifier: PlayerBundleIdentifiers.netease,
+                previous: .kugou,
+                neteaseRunning: true,
+                kugouRunning: true
+            ),
+            .netease
+        )
+        XCTAssertEqual(
+            AutomaticPlayerSelection.choose(
+                activeBundleIdentifier: nil,
+                previous: .kugou,
+                neteaseRunning: true,
+                kugouRunning: true,
+                neteasePlaying: true
+            ),
+            .netease
+        )
+    }
+
+    func testBackgroundAudioOverridesFrontmostPlayer() {
+        XCTAssertEqual(
+            AutomaticPlayerSelection.choose(
+                activeBundleIdentifier: nil,
+                frontmostBundleIdentifier: PlayerBundleIdentifiers.kugou,
+                previous: .kugou,
+                neteaseRunning: true,
+                kugouRunning: true,
+                neteaseAudible: true,
+                kugouAudible: false
+            ),
+            .netease
+        )
+        XCTAssertEqual(
+            AutomaticPlayerSelection.choose(
+                activeBundleIdentifier: nil,
+                frontmostBundleIdentifier: PlayerBundleIdentifiers.netease,
+                previous: .netease,
+                neteaseRunning: true,
+                kugouRunning: true,
+                neteaseAudible: false,
+                kugouAudible: true
+            ),
+            .kugou
+        )
+    }
+
     func testTrackNormalizationRemovesVersionAndWhitespace() {
         XCTAssertEqual(TrackIdentity.normalize("晴天（Live 版） "), "晴天")
         XCTAssertEqual(TrackIdentity.normalize("Hello [Remastered]"), "hello")
@@ -28,6 +97,33 @@ final class ModelsTests: XCTestCase {
         let track = TrackIdentity(title: "t", artist: "a", duration: 203)
         let snapshot = PlayerSnapshot(availability: .ready, track: track, progress: 973, isPlaying: true)
         XCTAssertEqual(snapshot.normalizedProgress, 161, accuracy: 0.001)
+    }
+
+    func testKugouLyricsUseHalfSecondLeadWithoutAffectingNetEase() {
+        let track = TrackIdentity(title: "t", artist: "a", duration: 203, player: .kugou)
+        let kugou = PlayerSnapshot(availability: .ready, track: track, progress: 10, isPlaying: true, player: .kugou)
+        let netease = PlayerSnapshot(
+            availability: .ready,
+            track: .init(title: "t", artist: "a", duration: 203, player: .netease),
+            progress: 10,
+            isPlaying: true,
+            player: .netease
+        )
+        XCTAssertEqual(kugou.lyricProgress, 10.5, accuracy: 0.001)
+        XCTAssertEqual(netease.lyricProgress, 10, accuracy: 0.001)
+    }
+
+    func testSystemProgressAdvancesWithoutMediaTimestamp() {
+        let state = SystemNowPlayingState(
+            processIdentifier: 1,
+            title: "Song",
+            artist: "Artist",
+            elapsed: 10,
+            rate: 1,
+            timestamp: nil,
+            observedAt: Date().addingTimeInterval(-2)
+        )
+        XCTAssertEqual(state.currentProgress, 12, accuracy: 0.1)
     }
 
     func testTranslationModeUsesTranslationWhenAvailable() {

@@ -6,7 +6,7 @@ final class AppViewModel: ObservableObject {
     private static let lyricsLookupTimeout: TimeInterval = 12
     @Published private(set) var snapshot = PlayerSnapshot(availability: .notRunning)
     @Published private(set) var document: LyricsDocument?
-    @Published private(set) var message = "正在连接网易云音乐…"
+    @Published private(set) var message = "正在等待播放器…"
     @Published private(set) var isLoading = false
     @Published var settingsPresented = false
 
@@ -16,9 +16,10 @@ final class AppViewModel: ObservableObject {
     private var timer: Timer?
     private var loadTask: Task<Void, Never>?
     private var currentKey: String?
+    private var permissionRequested = false
 
-    init(player: PlayerAdapter? = nil, providers: [LyricsProvider] = [NetEaseLyricsProvider(), LRCLIBLyricsProvider()]) {
-        self.player = player ?? NetEaseAXPlayerAdapter(); self.providers = providers
+    init(player: PlayerAdapter? = nil, providers: [LyricsProvider] = [KugouLocalLyricsProvider(), NetEaseLyricsProvider(), LRCLIBLyricsProvider()]) {
+        self.player = player ?? AutomaticPlayerAdapter(); self.providers = providers
         let progressTimer = Timer(timeInterval: 0.10, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
         }
@@ -33,8 +34,10 @@ final class AppViewModel: ObservableObject {
     func refresh(force: Bool = false) {
         snapshot = player.snapshot()
         switch snapshot.availability {
-        case .permissionRequired: message = "辅助功能仅用于备用播放控制，不影响后台歌词识别"
-        case .notRunning: message = "请先启动网易云音乐"
+        case .permissionRequired:
+            message = "酷狗歌词同步与控制需要辅助功能权限"
+            if !permissionRequested { permissionRequested = true; player.requestPermission() }
+        case .notRunning: message = "请先启动网易云音乐或酷狗音乐"
         case .connecting(let detail): message = detail
         case .incompatible(let detail): message = detail
         case .ready: break
@@ -86,7 +89,7 @@ final class AppViewModel: ObservableObject {
     }
 
     var currentLines: (String, String?) {
-        guard let document, let index = document.lineIndex(at: snapshot.normalizedProgress) else { return (isLoading ? "正在加载歌词…" : message, nil) }
+        guard let document, let index = document.lineIndex(at: snapshot.lyricProgress) else { return (isLoading ? "正在加载歌词…" : message, nil) }
         let presentation = LyricPresentation.make(document: document, index: index, mode: SettingsStoreReference.shared.appearance.mode)
         return (presentation.primary, presentation.secondary)
     }
