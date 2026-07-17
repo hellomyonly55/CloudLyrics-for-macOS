@@ -2,14 +2,17 @@
 set -euo pipefail
 
 ROOT="${0:A:h:h}"
-VERSION="${1:-0.1.0}"
+VERSION="${1:-0.2.0}"
 IDENTIFIER="io.github.hellomyonly55.CloudLyrics"
 OUTPUT_DIR="$ROOT/.build/releases"
 STAGING_DIR="${TMPDIR%/}/CloudLyrics-release/$VERSION-$(date +%Y%m%d%H%M%S)-$$"
 APP="$STAGING_DIR/CloudLyrics.app"
 CONTENTS="$APP/Contents"
 ZIP="$OUTPUT_DIR/CloudLyrics-v$VERSION-universal.zip"
-CHECKSUM="$ZIP.sha256"
+DMG="$OUTPUT_DIR/CloudLyrics-v$VERSION-universal.dmg"
+ZIP_CHECKSUM="$ZIP.sha256"
+DMG_CHECKSUM="$DMG.sha256"
+DMG_STAGING="$STAGING_DIR/dmg"
 
 if [[ "$VERSION" != <->.<->.<-> ]]; then
     print -u2 "Version must use semantic versioning, for example 0.1.0"
@@ -22,11 +25,13 @@ if [[ "$PLIST_VERSION" != "$VERSION" ]]; then
     exit 4
 fi
 
-if [[ -e "$ZIP" || -e "$CHECKSUM" ]]; then
-    print -u2 "Release output already exists: $ZIP"
-    print -u2 "Remove the two explicit output files manually before rebuilding this version."
-    exit 3
-fi
+for artifact in "$ZIP" "$DMG" "$ZIP_CHECKSUM" "$DMG_CHECKSUM"; do
+    if [[ -e "$artifact" ]]; then
+        print -u2 "Release output already exists: $artifact"
+        print -u2 "Remove that explicit output file manually before rebuilding this version."
+        exit 3
+    fi
+done
 
 cd "$ROOT"
 ARM_SCRATCH="$ROOT/.build/release-arm64"
@@ -44,7 +49,15 @@ chmod +x "$CONTENTS/MacOS/CloudLyrics"
 codesign --force --deep --sign - --identifier "$IDENTIFIER" "$APP"
 
 COPYFILE_DISABLE=1 ditto -c -k --keepParent --norsrc "$APP" "$ZIP"
-(cd "$OUTPUT_DIR" && shasum -a 256 "$ZIP:t") > "$CHECKSUM"
+mkdir -p "$DMG_STAGING"
+COPYFILE_DISABLE=1 ditto "$APP" "$DMG_STAGING/CloudLyrics.app"
+ln -s /Applications "$DMG_STAGING/Applications"
+hdiutil create -volname "CloudLyrics $VERSION" -srcfolder "$DMG_STAGING" -ov -format UDZO "$DMG"
+(cd "$OUTPUT_DIR" && shasum -a 256 "$ZIP:t") > "$ZIP_CHECKSUM"
+(cd "$OUTPUT_DIR" && shasum -a 256 "$DMG:t") > "$DMG_CHECKSUM"
+chmod 644 "$ZIP" "$DMG" "$ZIP_CHECKSUM" "$DMG_CHECKSUM"
 
 print "$ZIP"
-print "$CHECKSUM"
+print "$DMG"
+print "$ZIP_CHECKSUM"
+print "$DMG_CHECKSUM"
