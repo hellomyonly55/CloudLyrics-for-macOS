@@ -4,6 +4,8 @@ All notable changes to CloudLyrics are documented in this file.
 
 ## Unreleased
 
+## [0.2.0] - 2026-07-17
+
 ### Added
 
 - KuGou Music 3.3.2 playback synchronization and controls through MediaRemote when available, with a tested macOS Accessibility fallback.
