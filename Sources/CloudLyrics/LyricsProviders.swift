@@ -23,7 +23,7 @@ struct NetEaseLyricsProvider: LyricsProvider {
 
     func lyrics(for track: TrackIdentity) async throws -> LyricsDocument {
         let songID: Int
-        if let sourceID = track.sourceID, let exactID = Int(sourceID) {
+        if track.player == .netease, let sourceID = track.sourceID, let exactID = Int(sourceID) {
             songID = exactID
         } else {
             let query = "\(track.title) \(track.artist)"
@@ -45,7 +45,7 @@ struct NetEaseLyricsProvider: LyricsProvider {
         let parsed = LRCParser.parse(raw, translation: response.tlyric?.lyric)
         guard !parsed.lines.isEmpty else { throw LyricsError.noLyrics }
         var matchedTrack = track
-        matchedTrack.sourceID = String(songID)
+        if track.player == .netease { matchedTrack.sourceID = String(songID) }
         return .init(track: matchedTrack, lines: parsed.lines, source: name, offset: parsed.offset)
     }
 
@@ -70,6 +70,64 @@ struct NetEaseLyricsProvider: LyricsProvider {
     }
 }
 
+struct KugouLocalLyricsProvider: LyricsProvider {
+    let name = "酷狗音乐（本地）"
+    private let directory: URL
+
+    init(directory: URL? = nil) {
+        self.directory = directory ?? FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Containers/com.kugou.mac.Music/Data/Documents/Caches/kgLyric", isDirectory: true)
+    }
+
+    func lyrics(for track: TrackIdentity) async throws -> LyricsDocument {
+        guard track.player == .kugou else { throw LyricsError.noMatch }
+        let files = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ).filter { ["krc", "lrc"].contains($0.pathExtension.lowercased()) }
+        let scored: [(file: URL, score: Double)] = files.map { file in
+            (file: file, score: score(file, track))
+        }
+        let matches = scored.filter { $0.score >= 0.55 }
+        let best = matches.max { lhs, rhs in
+            if lhs.score == rhs.score { return filePriority(lhs.file) < filePriority(rhs.file) }
+            return lhs.score < rhs.score
+        }
+        guard let candidate = best?.file else { throw LyricsError.noMatch }
+
+        let data = try Data(contentsOf: candidate)
+        let parsed: (lines: [TimedLyricLine], offset: TimeInterval)
+        if candidate.pathExtension.lowercased() == "krc" {
+            parsed = try KRCParser.parse(data)
+        } else {
+            guard let text = decodeLRC(data) else { throw LyricsError.invalidResponse }
+            parsed = LRCParser.parse(text)
+        }
+        guard !parsed.lines.isEmpty else { throw LyricsError.noLyrics }
+        return .init(track: track, lines: parsed.lines, source: name, offset: parsed.offset)
+    }
+
+    private func score(_ file: URL, _ track: TrackIdentity) -> Double {
+        var stem = file.deletingPathExtension().lastPathComponent
+        stem = stem.replacingOccurrences(of: #"_[0-9a-fA-F]{32}$"#, with: "", options: .regularExpression)
+        let parts = stem.components(separatedBy: " - ")
+        let candidateArtist = parts.count > 1 ? parts[0] : stem
+        let candidateTitle = parts.count > 1 ? parts.dropFirst().joined(separator: " - ") : stem
+        let title = similarity(TrackIdentity.normalize(candidateTitle), TrackIdentity.normalize(track.title))
+        let artist = similarity(TrackIdentity.normalize(candidateArtist), TrackIdentity.normalize(track.artist))
+        return title * 0.7 + artist * 0.3
+    }
+
+    private func filePriority(_ file: URL) -> Int { file.pathExtension.lowercased() == "krc" ? 1 : 0 }
+
+    private func decodeLRC(_ data: Data) -> String? {
+        if let value = String(data: data, encoding: .utf8) { return value }
+        let encoding = CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue))
+        return NSString(data: data, encoding: encoding) as String?
+    }
+}
+
 struct LRCLIBLyricsProvider: LyricsProvider {
     let name = "LRCLIB"
     private let session: URLSession
@@ -91,7 +149,7 @@ struct LRCLIBLyricsProvider: LyricsProvider {
     }
 }
 
-private func similarity(_ lhs: String, _ rhs: String) -> Double {
+func similarity(_ lhs: String, _ rhs: String) -> Double {
     guard !lhs.isEmpty, !rhs.isEmpty else { return 0 }
     if lhs == rhs { return 1 }
     if lhs.contains(rhs) || rhs.contains(lhs) { return 0.82 }

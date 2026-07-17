@@ -73,7 +73,7 @@ struct ContentView: View {
         switch viewModel.snapshot.availability {
         case .ready: viewModel.message
         case .permissionRequired: "等待辅助功能授权"
-        case .notRunning: "网易云音乐未运行"
+        case .notRunning: "网易云音乐与酷狗音乐均未运行"
         case .connecting(let text): text
         case .incompatible(let text): text
         }

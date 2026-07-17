@@ -1,15 +1,36 @@
 import Foundation
 import SwiftUI
 
+enum PlayerKind: String, Codable, CaseIterable, Sendable {
+    case netease
+    case kugou
+
+    var displayName: String {
+        switch self {
+        case .netease: "网易云音乐"
+        case .kugou: "酷狗音乐"
+        }
+    }
+}
+
 struct TrackIdentity: Codable, Equatable, Hashable, Sendable {
     var title: String
     var artist: String
     var duration: TimeInterval?
     var sourceID: String?
+    var player: PlayerKind
+
+    init(title: String, artist: String, duration: TimeInterval? = nil, sourceID: String? = nil, player: PlayerKind = .netease) {
+        self.title = title
+        self.artist = artist
+        self.duration = duration
+        self.sourceID = sourceID
+        self.player = player
+    }
 
     var normalizedKey: String {
-        if let sourceID, !sourceID.isEmpty { return "netease:\(sourceID)" }
-        return "\(Self.normalize(title))|\(Self.normalize(artist))|\(Int((duration ?? 0).rounded()))"
+        if let sourceID, !sourceID.isEmpty { return "\(player.rawValue):\(sourceID)" }
+        return "\(player.rawValue):\(Self.normalize(title))|\(Self.normalize(artist))|\(Int((duration ?? 0).rounded()))"
     }
 
     static func normalize(_ value: String) -> String {
@@ -17,6 +38,17 @@ struct TrackIdentity: Codable, Equatable, Hashable, Sendable {
             .replacingOccurrences(of: #"[\(\[（【].*?[\)\]）】]"#, with: "", options: .regularExpression)
             .replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
             .lowercased()
+    }
+
+    private enum CodingKeys: String, CodingKey { case title, artist, duration, sourceID, player }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        title = try container.decode(String.self, forKey: .title)
+        artist = try container.decode(String.self, forKey: .artist)
+        duration = try container.decodeIfPresent(TimeInterval.self, forKey: .duration)
+        sourceID = try container.decodeIfPresent(String.self, forKey: .sourceID)
+        player = try container.decodeIfPresent(PlayerKind.self, forKey: .player) ?? .netease
     }
 }
 

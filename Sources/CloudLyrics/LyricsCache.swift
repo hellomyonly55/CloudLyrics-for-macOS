@@ -10,7 +10,10 @@ actor LyricsCache {
         let folder = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("CloudLyrics", isDirectory: true)
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         url = folder.appendingPathComponent("lyrics.json")
-        if let data = try? Data(contentsOf: url), let value = try? JSONDecoder().decode([String: Entry].self, from: data) { entries = value }
+        if let data = try? Data(contentsOf: url), let value = try? JSONDecoder().decode([String: Entry].self, from: data) {
+            // Re-index old NetEase-only cache files after TrackIdentity gained a player namespace.
+            entries = Dictionary(value.map { ($0.value.document.track.normalizedKey, $0.value) }, uniquingKeysWith: { _, newer in newer })
+        }
     }
 
     func document(for track: TrackIdentity) -> LyricsDocument? {

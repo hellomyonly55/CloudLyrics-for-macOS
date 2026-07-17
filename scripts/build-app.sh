@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="${0:A:h:h}"
-APP="${CLOUDLYRICS_APP_PATH:-$HOME/Applications/CloudLyrics.app}"
+APP="${CLOUDLYRICS_APP_PATH:-/Applications/CloudLyrics.app}"
 CONTENTS="$APP/Contents"
 
 cd "$ROOT"

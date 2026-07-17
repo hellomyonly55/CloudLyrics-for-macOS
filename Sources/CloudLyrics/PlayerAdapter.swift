@@ -10,10 +10,13 @@ enum NetEaseConnectionState: Equatable {
 }
 
 struct PlayerSnapshot: Equatable {
+    static let kugouLyricLead: TimeInterval = 0.5
+
     var availability: PlayerAvailability
     var track: TrackIdentity?
     var progress: TimeInterval = 0
     var isPlaying = false
+    var player: PlayerKind?
 
     var normalizedProgress: TimeInterval {
         guard let duration = track?.duration, duration > 0 else { return max(0, progress) }
@@ -21,9 +24,13 @@ struct PlayerSnapshot: Equatable {
         if positive <= duration { return positive }
         return positive.truncatingRemainder(dividingBy: duration)
     }
+
+    var lyricProgress: TimeInterval {
+        normalizedProgress + (player == .kugou ? Self.kugouLyricLead : 0)
+    }
 }
 
-enum PlayerCommand { case previous, playPause, next }
+enum PlayerCommand: Equatable { case previous, playPause, next }
 
 enum NetEaseCEFCommand {
     static func selector(for command: PlayerCommand) -> String {
@@ -42,7 +49,8 @@ enum NetEaseCEFCommand {
 
 @MainActor
 protocol PlayerAdapter: AnyObject {
-    var connectionState: NetEaseConnectionState { get }
+    var kind: PlayerKind? { get }
+    var isRunning: Bool { get }
     func snapshot() -> PlayerSnapshot
     func perform(_ command: PlayerCommand) throws
     func requestPermission()
@@ -55,6 +63,8 @@ final class NetEaseAXPlayerAdapter: PlayerAdapter {
     private let cefBridge = NetEaseCEFBridge()
     private let launchCoordinator = NetEaseLaunchCoordinator()
 
+    let kind: PlayerKind? = .netease
+    var isRunning: Bool { !NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).isEmpty }
     var connectionState: NetEaseConnectionState { launchCoordinator.state }
 
     func requestPermission() {
@@ -67,7 +77,9 @@ final class NetEaseAXPlayerAdapter: PlayerAdapter {
         guard !running.isEmpty else { return snapshotForConnectionState() }
         cefBridge.update()
         if let cefState = cefBridge.state {
-            return localState.snapshot(playback: cefState)
+            var snapshot = localState.snapshot(playback: cefState)
+            snapshot.player = .netease
+            return snapshot
         }
         return snapshotForConnectionState()
     }
@@ -79,13 +91,13 @@ final class NetEaseAXPlayerAdapter: PlayerAdapter {
 
     private func snapshotForConnectionState() -> PlayerSnapshot {
         switch launchCoordinator.state {
-        case .checking: .init(availability: .connecting("正在检查网易云音乐…"))
-        case .launching: .init(availability: .connecting("正在启动网易云音乐…"))
-        case .restarting: .init(availability: .connecting("正在重新连接网易云音乐…"))
-        case .waitingForCEF: .init(availability: .connecting("正在同步网易云播放状态…"))
-        case .connected: .init(availability: .connecting("等待网易云播放事件…"))
-        case .stopped: .init(availability: .notRunning)
-        case .failed(let message): .init(availability: .incompatible(message))
+        case .checking: .init(availability: .connecting("正在检查网易云音乐…"), player: .netease)
+        case .launching: .init(availability: .connecting("正在启动网易云音乐…"), player: .netease)
+        case .restarting: .init(availability: .connecting("正在重新连接网易云音乐…"), player: .netease)
+        case .waitingForCEF: .init(availability: .connecting("正在同步网易云播放状态…"), player: .netease)
+        case .connected: .init(availability: .connecting("等待网易云播放事件…"), player: .netease)
+        case .stopped: .init(availability: .notRunning, player: .netease)
+        case .failed(let message): .init(availability: .incompatible(message), player: .netease)
         }
     }
 
@@ -134,8 +146,7 @@ private final class NetEaseLaunchCoordinator {
         if !isRunning {
             invalidateCEF()
             if !initialCheckHandled {
-                initialCheckHandled = true; lastSawRunning = false
-                startLaunch()
+                initialCheckHandled = true; lastSawRunning = false; state = .stopped
             } else if lastSawRunning {
                 lastSawRunning = false; state = .stopped
             }
@@ -160,23 +171,6 @@ private final class NetEaseLaunchCoordinator {
             invalidateCEF()
             startRestart(applications: runningApplications)
             return
-        }
-    }
-
-    private func startLaunch() {
-        guard FileManager.default.fileExists(atPath: applicationURL.path) else {
-            state = .failed("未找到 /Applications/NeteaseMusic.app")
-            return
-        }
-        state = .launching
-        operation = Task { [weak self] in
-            guard let self else { return }
-            do {
-                try await self.launchApplication()
-                self.state = .waitingForCEF
-                self.cefDeadline = Date().addingTimeInterval(12)
-            } catch { self.state = .failed("启动网易云失败：\(error.localizedDescription)") }
-            self.operation = nil
         }
     }
 
@@ -350,8 +344,8 @@ enum AXPlayerError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .permissionRequired: "需要辅助功能权限"
-        case .notRunning: "网易云音乐尚未运行"
-        case .controlUnavailable: "当前网易云版本中没有找到对应控制按钮"
+        case .notRunning: "当前播放器尚未运行"
+        case .controlUnavailable: "当前播放器暂时无法执行此控制"
         }
     }
 }

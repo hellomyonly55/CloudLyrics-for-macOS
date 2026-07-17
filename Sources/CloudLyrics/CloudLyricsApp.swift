@@ -25,7 +25,7 @@ enum CloudLyricsApp {
     }
 
     private static func diagnoseNowPlaying() {
-        let adapter = NetEaseAXPlayerAdapter()
+        let adapter = AutomaticPlayerAdapter()
         let deadline = Date().addingTimeInterval(3)
         var latest = adapter.snapshot()
         while Date() < deadline, latest.track == nil || latest.track?.title == "正在获取歌曲信息…" {
@@ -33,12 +33,27 @@ enum CloudLyricsApp {
             latest = adapter.snapshot()
         }
         if let track = latest.track {
-            print("READY\t\(track.title)\t\(track.artist)\t\(track.duration ?? 0)\t\(latest.progress)\t\(latest.isPlaying)")
+            print("READY\t\(latest.player?.rawValue ?? "unknown")\t\(track.title)\t\(track.artist)\t\(track.duration ?? 0)\t\(latest.progress)\t\(latest.isPlaying)")
+            if track.player == .kugou {
+                var lyricResult: Result<LyricsDocument, Error>?
+                Task {
+                    do { lyricResult = .success(try await KugouLocalLyricsProvider().lyrics(for: track)) }
+                    catch { lyricResult = .failure(error) }
+                }
+                let lyricDeadline = Date().addingTimeInterval(2)
+                while lyricResult == nil, Date() < lyricDeadline { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+                switch lyricResult {
+                case .success(let document): print("LYRICS\t\(document.source)\t\(document.lines.count)")
+                case .failure(let error): print("LYRICS_UNAVAILABLE\t\(error.localizedDescription)")
+                case nil: print("LYRICS_UNAVAILABLE\t诊断超时")
+                }
+            }
         } else {
             switch latest.availability {
             case .notRunning: print("NOT_RUNNING")
             case .permissionRequired: print("PERMISSION_REQUIRED")
-            case .connecting(let message): print("CONNECTING\t\(message)")
+            case .connecting(let message):
+                print("CONNECTING\t\(message)\t\(adapter.diagnosticSummary)")
             case .incompatible(let message): print("UNAVAILABLE\t\(message)")
             case .ready: print("READY_WITHOUT_TRACK")
             }
