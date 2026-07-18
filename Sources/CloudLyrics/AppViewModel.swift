@@ -20,38 +20,44 @@ final class AppViewModel: ObservableObject {
 
     init(player: PlayerAdapter? = nil, providers: [LyricsProvider] = [KugouLocalLyricsProvider(), NetEaseLyricsProvider(), LRCLIBLyricsProvider()]) {
         self.player = player ?? AutomaticPlayerAdapter(); self.providers = providers
-        let progressTimer = Timer(timeInterval: 0.10, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refresh() }
-        }
-        progressTimer.tolerance = 0.02
-        RunLoop.main.add(progressTimer, forMode: .common)
-        timer = progressTimer
         refresh()
     }
 
     deinit { timer?.invalidate(); loadTask?.cancel() }
 
     func refresh(force: Bool = false) {
-        snapshot = player.snapshot()
+        defer { scheduleNextRefresh() }
+        let latestSnapshot = player.snapshot()
+        if latestSnapshot != snapshot { snapshot = latestSnapshot }
         switch snapshot.availability {
         case .permissionRequired:
-            message = "酷狗歌词同步与控制需要辅助功能权限"
+            setMessage("酷狗歌词同步与控制需要辅助功能权限")
             if !permissionRequested { permissionRequested = true; player.requestPermission() }
-        case .notRunning: message = "请先启动网易云音乐或酷狗音乐"
-        case .connecting(let detail): message = detail
-        case .incompatible(let detail): message = detail
+        case .notRunning: setMessage("请先启动网易云音乐或酷狗音乐")
+        case .connecting(let detail): setMessage(detail)
+        case .incompatible(let detail): setMessage(detail)
         case .ready: break
         }
-        guard let track = snapshot.track else { currentKey = nil; document = nil; return }
+        guard let track = snapshot.track else {
+            if currentKey != nil { loadTask?.cancel() }
+            currentKey = nil
+            if document != nil { document = nil }
+            if isLoading { isLoading = false }
+            return
+        }
         let key = track.normalizedKey
         guard force || key != currentKey else { return }
-        currentKey = key; document = nil; isLoading = true
+        currentKey = key
+        if document != nil { document = nil }
+        if !isLoading { isLoading = true }
         loadTask?.cancel()
         loadTask = Task { [weak self] in
             guard let self else { return }
             if !force, let cached = await cache.document(for: track) {
                 guard !Task.isCancelled, currentKey == key else { return }
-                document = cached; isLoading = false; return
+                document = cached
+                if isLoading { isLoading = false }
+                return
             }
             let availableProviders = providers
             let result = await withTaskGroup(of: LyricsDocument?.self) { group in
@@ -74,18 +80,44 @@ final class AppViewModel: ObservableObject {
             if let result {
                 await cache.store(result)
                 document = result
-                message = ""
+                setMessage("")
             } else {
-                message = "暂无歌词"
+                setMessage("暂无歌词")
             }
-            isLoading = false
+            if isLoading { isLoading = false }
         }
     }
 
     func requestPermission() { player.requestPermission() }
     func perform(_ command: PlayerCommand) {
         do { try player.perform(command); DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in self?.refresh() } }
-        catch { message = error.localizedDescription }
+        catch { setMessage(error.localizedDescription) }
+    }
+
+    private func setMessage(_ value: String) {
+        if message != value { message = value }
+    }
+
+    private func scheduleNextRefresh() {
+        timer?.invalidate()
+        let interval: TimeInterval
+        if snapshot.isPlaying {
+            // Five samples per second keeps time-synchronised lyrics responsive
+            // without continuously polling player, process and audio state at 10 Hz.
+            interval = 0.2
+        } else {
+            switch snapshot.availability {
+            case .connecting: interval = 0.5
+            case .ready: interval = 0.75
+            case .permissionRequired, .notRunning, .incompatible: interval = 1.0
+            }
+        }
+        let next = Timer(timeInterval: interval, repeats: false) { [weak self] _ in
+            Task { @MainActor in self?.refresh() }
+        }
+        next.tolerance = min(0.1, interval * 0.2)
+        RunLoop.main.add(next, forMode: .common)
+        timer = next
     }
 
     var currentLines: (String, String?) {

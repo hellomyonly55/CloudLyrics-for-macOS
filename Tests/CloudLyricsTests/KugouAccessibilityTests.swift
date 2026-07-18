@@ -26,6 +26,48 @@ final class KugouAccessibilityTests: XCTestCase {
         XCTAssertNil(KugouAXSnapshotParser.parse([.init(value: "Song - Singer", position: .zero)]))
     }
 
+    func testLocatorUsesCachedPlaybackNodesAfterInitialScan() {
+        var locator = KugouAccessibilityLocator<Int>()
+        var values: [Int: KugouAXTextEntry] = [
+            10: .init(value: "Song - Singer", position: .init(x: 10, y: 20)),
+            11: .init(value: "01:02", position: .init(x: 100, y: 20)),
+            12: .init(value: "/ 03:57", position: .init(x: 140, y: 20))
+        ]
+        var scans = 0
+        let scan = {
+            scans += 1
+            return values.keys.sorted().map { KugouAccessibilityLocator<Int>.Candidate(entry: values[$0]!, node: $0) }
+        }
+
+        XCTAssertEqual(locator.resolve(read: { values[$0] }, scan: scan)?.progress, 62)
+        values[11]?.value = "01:03"
+        XCTAssertEqual(locator.resolve(read: { values[$0] }, scan: scan)?.progress, 63)
+        XCTAssertEqual(scans, 1)
+    }
+
+    func testLocatorFallsBackToFullScanWhenCachedNodeBecomesInvalid() {
+        var locator = KugouAccessibilityLocator<Int>()
+        var values: [Int: KugouAXTextEntry] = [
+            1: .init(value: "Old - Singer", position: .init(x: 10, y: 20)),
+            2: .init(value: "00:10", position: .init(x: 100, y: 20)),
+            3: .init(value: "/ 03:00", position: .init(x: 140, y: 20))
+        ]
+        var scans = 0
+        func scan() -> [KugouAccessibilityLocator<Int>.Candidate] {
+            scans += 1
+            return values.keys.sorted().map { .init(entry: values[$0]!, node: $0) }
+        }
+        XCTAssertEqual(locator.resolve(read: { values[$0] }, scan: scan)?.title, "Old")
+
+        values = [
+            4: .init(value: "New - Artist", position: .init(x: 10, y: 30)),
+            5: .init(value: "00:01", position: .init(x: 100, y: 30)),
+            6: .init(value: "/ 04:00", position: .init(x: 140, y: 30))
+        ]
+        XCTAssertEqual(locator.resolve(read: { values[$0] }, scan: scan)?.title, "New")
+        XCTAssertEqual(scans, 2)
+    }
+
     func testInterpolatesWholeSecondProgressSamples() {
         var estimator = KugouProgressEstimator()
         let start = Date(timeIntervalSince1970: 1_000)

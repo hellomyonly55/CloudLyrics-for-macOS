@@ -70,31 +70,75 @@ struct NetEaseLyricsProvider: LyricsProvider {
     }
 }
 
-struct KugouLocalLyricsProvider: LyricsProvider {
-    let name = "酷狗音乐（本地）"
-    private let directory: URL
+struct KugouLyricFileCandidate: Equatable, Sendable {
+    var url: URL
+    var normalizedTitle: String
+    var normalizedArtist: String
+    var priority: Int
+}
 
-    init(directory: URL? = nil) {
-        self.directory = directory ?? FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Containers/com.kugou.mac.Music/Data/Documents/Caches/kgLyric", isDirectory: true)
-    }
+actor KugouLyricsDirectoryIndex {
+    private var indexedDirectory: URL?
+    private var directoryModificationDate: Date?
+    private var cachedCandidates: [KugouLyricFileCandidate] = []
 
-    func lyrics(for track: TrackIdentity) async throws -> LyricsDocument {
-        guard track.player == .kugou else { throw LyricsError.noMatch }
+    func candidates(in directory: URL) throws -> [KugouLyricFileCandidate] {
+        let attributes = try FileManager.default.attributesOfItem(atPath: directory.path)
+        let modificationDate = attributes[.modificationDate] as? Date
+        if modificationDate != nil,
+           indexedDirectory == directory,
+           directoryModificationDate == modificationDate {
+            return cachedCandidates
+        }
         let files = try FileManager.default.contentsOfDirectory(
             at: directory,
             includingPropertiesForKeys: [.isRegularFileKey],
             options: [.skipsHiddenFiles]
         ).filter { ["krc", "lrc"].contains($0.pathExtension.lowercased()) }
-        let scored: [(file: URL, score: Double)] = files.map { file in
-            (file: file, score: score(file, track))
+        cachedCandidates = files.map(Self.makeCandidate)
+        indexedDirectory = directory
+        directoryModificationDate = modificationDate
+        return cachedCandidates
+    }
+
+    private static func makeCandidate(_ file: URL) -> KugouLyricFileCandidate {
+        var stem = file.deletingPathExtension().lastPathComponent
+        stem = stem.replacingOccurrences(of: #"_[0-9a-fA-F]{32}$"#, with: "", options: .regularExpression)
+        let parts = stem.components(separatedBy: " - ")
+        let artist = parts.count > 1 ? parts[0] : stem
+        let title = parts.count > 1 ? parts.dropFirst().joined(separator: " - ") : stem
+        return .init(
+            url: file,
+            normalizedTitle: TrackIdentity.normalize(title),
+            normalizedArtist: TrackIdentity.normalize(artist),
+            priority: file.pathExtension.lowercased() == "krc" ? 1 : 0
+        )
+    }
+}
+
+struct KugouLocalLyricsProvider: LyricsProvider {
+    let name = "酷狗音乐（本地）"
+    private let directory: URL
+    private let index: KugouLyricsDirectoryIndex
+
+    init(directory: URL? = nil, index: KugouLyricsDirectoryIndex = KugouLyricsDirectoryIndex()) {
+        self.directory = directory ?? FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Containers/com.kugou.mac.Music/Data/Documents/Caches/kgLyric", isDirectory: true)
+        self.index = index
+    }
+
+    func lyrics(for track: TrackIdentity) async throws -> LyricsDocument {
+        guard track.player == .kugou else { throw LyricsError.noMatch }
+        let candidates = try await index.candidates(in: directory)
+        let scored: [(candidate: KugouLyricFileCandidate, score: Double)] = candidates.map { candidate in
+            (candidate: candidate, score: score(candidate, track))
         }
         let matches = scored.filter { $0.score >= 0.55 }
         let best = matches.max { lhs, rhs in
-            if lhs.score == rhs.score { return filePriority(lhs.file) < filePriority(rhs.file) }
+            if lhs.score == rhs.score { return lhs.candidate.priority < rhs.candidate.priority }
             return lhs.score < rhs.score
         }
-        guard let candidate = best?.file else { throw LyricsError.noMatch }
+        guard let candidate = best?.candidate.url else { throw LyricsError.noMatch }
 
         let data = try Data(contentsOf: candidate)
         let parsed: (lines: [TimedLyricLine], offset: TimeInterval)
@@ -108,18 +152,11 @@ struct KugouLocalLyricsProvider: LyricsProvider {
         return .init(track: track, lines: parsed.lines, source: name, offset: parsed.offset)
     }
 
-    private func score(_ file: URL, _ track: TrackIdentity) -> Double {
-        var stem = file.deletingPathExtension().lastPathComponent
-        stem = stem.replacingOccurrences(of: #"_[0-9a-fA-F]{32}$"#, with: "", options: .regularExpression)
-        let parts = stem.components(separatedBy: " - ")
-        let candidateArtist = parts.count > 1 ? parts[0] : stem
-        let candidateTitle = parts.count > 1 ? parts.dropFirst().joined(separator: " - ") : stem
-        let title = similarity(TrackIdentity.normalize(candidateTitle), TrackIdentity.normalize(track.title))
-        let artist = similarity(TrackIdentity.normalize(candidateArtist), TrackIdentity.normalize(track.artist))
+    private func score(_ candidate: KugouLyricFileCandidate, _ track: TrackIdentity) -> Double {
+        let title = similarity(candidate.normalizedTitle, TrackIdentity.normalize(track.title))
+        let artist = similarity(candidate.normalizedArtist, TrackIdentity.normalize(track.artist))
         return title * 0.7 + artist * 0.3
     }
-
-    private func filePriority(_ file: URL) -> Int { file.pathExtension.lowercased() == "krc" ? 1 : 0 }
 
     private func decodeLRC(_ data: Data) -> String? {
         if let value = String(data: data, encoding: .utf8) { return value }
