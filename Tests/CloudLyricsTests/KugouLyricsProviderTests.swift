@@ -20,11 +20,20 @@ final class KugouLyricsProviderTests: XCTestCase {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: folder) }
-        let provider = KugouLocalLyricsProvider(directory: folder)
+        let index = KugouLyricsDirectoryIndex()
+        let provider = KugouLocalLyricsProvider(directory: folder, index: index)
         do {
             _ = try await provider.lyrics(for: .init(title: "Song", artist: "Singer", player: .netease))
             XCTFail("Expected noMatch")
         } catch { XCTAssertEqual(error as? LyricsError, .noMatch) }
+
+        let initialCandidates = try? await index.candidates(in: folder)
+        XCTAssertEqual(initialCandidates, [])
+        let lyric = folder.appendingPathComponent("Singer - Song_0123456789abcdef0123456789abcdef.lrc")
+        try? Data("[00:01.00]matched".utf8).write(to: lyric)
+        try? FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(2)], ofItemAtPath: folder.path)
+        let updatedCandidates = try? await index.candidates(in: folder)
+        XCTAssertEqual(updatedCandidates?.map { $0.url.lastPathComponent }, [lyric.lastPathComponent])
     }
 
     func testPrefersKRCWhenCandidatesHaveSameMatch() async throws {

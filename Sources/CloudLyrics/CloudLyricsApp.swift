@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Darwin
 import QuartzCore
 import SwiftUI
@@ -68,7 +69,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var settingsWindow: NSPanel?
     private let settings = SettingsStoreReference.shared
     private let viewModel = AppViewModel()
-    private var statusUpdateTimer: Timer?
+    private var statusSubscriptions = Set<AnyCancellable>()
+    private var lastStatusPresentation: StatusPresentation?
+    private var statusUpdateScheduled = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -99,12 +102,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             statusLyricsView.bottomAnchor.constraint(equalTo: button.bottomAnchor, constant: -1)
         ])
         updateStatusLyrics()
-        let lyricTimer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.updateStatusLyrics() }
-        }
-        lyricTimer.tolerance = 0.008
-        RunLoop.main.add(lyricTimer, forMode: .common)
-        statusUpdateTimer = lyricTimer
+        Publishers.Merge(viewModel.objectWillChange, settings.objectWillChange)
+            .sink { [weak self] _ in
+                // ObservableObject announces immediately before mutation. Updating
+                // on the next main-loop turn reads the completed state change.
+                self?.scheduleStatusUpdate()
+            }
+            .store(in: &statusSubscriptions)
     }
 
     private func openSettings() {
@@ -143,12 +147,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
+    private func scheduleStatusUpdate() {
+        guard !statusUpdateScheduled else { return }
+        statusUpdateScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.statusUpdateScheduled = false
+            self.updateStatusLyrics()
+        }
+    }
+
     private func updateStatusLyrics() {
         guard let item = statusItem else { return }
         let lines = viewModel.currentLines
         let appearance = settings.appearance
         let primary = lines.0.isEmpty ? "等待歌词…" : lines.0
         let secondary = lines.1 ?? " "
+        let presentation = StatusPresentation(
+            primary: primary,
+            secondary: secondary,
+            appearance: appearance,
+            showsSecondary: lines.1 != nil && appearance.mode != .single
+        )
+        guard presentation != lastStatusPresentation else { return }
+        lastStatusPresentation = presentation
         statusLyricsView.update(
             primary: primary,
             secondary: secondary,
@@ -159,10 +181,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             secondarySize: appearance.secondarySize,
             lineSpacing: appearance.lineSpacing,
             horizontalOffset: appearance.horizontalOffset,
-            showsSecondary: lines.1 != nil && appearance.mode != .single
+            showsSecondary: presentation.showsSecondary
         )
         item.length = min(max(appearance.width, 200), 700)
     }
+}
+
+private struct StatusPresentation: Equatable {
+    var primary: String
+    var secondary: String
+    var appearance: AppearanceSettings
+    var showsSecondary: Bool
 }
 
 @MainActor

@@ -7,6 +7,67 @@ enum PlayerBundleIdentifiers {
     static let kugou = "com.kugou.mac.Music"
 }
 
+struct PlayerProcessState: Equatable {
+    private(set) var identifiersByBundle: [String: Set<pid_t>] = [:]
+
+    mutating func applicationLaunched(bundleIdentifier: String, processIdentifier: pid_t) {
+        identifiersByBundle[bundleIdentifier, default: []].insert(processIdentifier)
+    }
+
+    mutating func applicationTerminated(bundleIdentifier: String, processIdentifier: pid_t) {
+        identifiersByBundle[bundleIdentifier]?.remove(processIdentifier)
+    }
+
+    func identifiers(for bundleIdentifier: String) -> [pid_t] {
+        Array(identifiersByBundle[bundleIdentifier] ?? []).sorted()
+    }
+}
+
+@MainActor
+final class PlayerApplicationRegistry {
+    private let workspace: NSWorkspace
+    private var state = PlayerProcessState()
+    private var observers: [NSObjectProtocol] = []
+
+    init(workspace: NSWorkspace = .shared) {
+        self.workspace = workspace
+        for bundleIdentifier in [PlayerBundleIdentifiers.netease, PlayerBundleIdentifiers.kugou] {
+            for application in NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier) {
+                state.applicationLaunched(bundleIdentifier: bundleIdentifier, processIdentifier: application.processIdentifier)
+            }
+        }
+        let center = workspace.notificationCenter
+        observers.append(center.addObserver(forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main) { [weak self] notification in
+            guard let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+            Task { @MainActor in self?.recordLaunch(application) }
+        })
+        observers.append(center.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main) { [weak self] notification in
+            guard let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+            Task { @MainActor in self?.recordTermination(application) }
+        })
+    }
+
+    deinit {
+        for observer in observers { workspace.notificationCenter.removeObserver(observer) }
+    }
+
+    func processIdentifiers(for bundleIdentifier: String) -> [pid_t] { state.identifiers(for: bundleIdentifier) }
+
+    func runningApplications(for bundleIdentifier: String) -> [NSRunningApplication] {
+        processIdentifiers(for: bundleIdentifier).compactMap(NSRunningApplication.init(processIdentifier:))
+    }
+
+    private func recordLaunch(_ application: NSRunningApplication) {
+        guard let bundleIdentifier = application.bundleIdentifier else { return }
+        state.applicationLaunched(bundleIdentifier: bundleIdentifier, processIdentifier: application.processIdentifier)
+    }
+
+    private func recordTermination(_ application: NSRunningApplication) {
+        guard let bundleIdentifier = application.bundleIdentifier else { return }
+        state.applicationTerminated(bundleIdentifier: bundleIdentifier, processIdentifier: application.processIdentifier)
+    }
+}
+
 struct SystemNowPlayingState: Equatable {
     var processIdentifier: pid_t
     var title: String
@@ -28,6 +89,25 @@ struct SystemNowPlayingState: Equatable {
     }
 }
 
+struct MediaRemoteRefreshPolicy {
+    var safetyInterval: TimeInterval = 0.5
+    private var dirty = true
+    private var lastRefresh: Date?
+
+    init(safetyInterval: TimeInterval = 0.5) {
+        self.safetyInterval = safetyInterval
+    }
+
+    mutating func markDirty() { dirty = true }
+
+    mutating func shouldRefresh(at now: Date) -> Bool {
+        guard dirty || lastRefresh == nil || now.timeIntervalSince(lastRefresh!) >= safetyInterval else { return false }
+        dirty = false
+        lastRefresh = now
+        return true
+    }
+}
+
 @MainActor
 final class MediaRemoteBridge {
     private typealias GetPID = @convention(c) (DispatchQueue, @escaping @convention(block) (Int32) -> Void) -> Void
@@ -45,6 +125,8 @@ final class MediaRemoteBridge {
     private var pending = false
     private var receivedPID: pid_t?
     private var receivedInfo: [String: Any]?
+    private var refreshPolicy = MediaRemoteRefreshPolicy()
+    private var notificationObservers: [NSObjectProtocol] = []
     private(set) var state: SystemNowPlayingState?
     private(set) var diagnosticSummary = "尚未请求系统播放信息"
 
@@ -71,15 +153,28 @@ final class MediaRemoteBridge {
         }
         setWantsNotifications?(true)
         registerNotifications?(.main)
+        let notificationCenter = NotificationCenter.default
+        let notificationNames = [
+            "kMRMediaRemoteNowPlayingInfoDidChangeNotification",
+            "kMRMediaRemoteNowPlayingApplicationDidChangeNotification",
+            "MRMediaRemoteNowPlayingInfoDidChangeNotification",
+            "MRMediaRemoteNowPlayingApplicationDidChangeNotification"
+        ]
+        notificationObservers = notificationNames.map { value in
+            notificationCenter.addObserver(forName: .init(value), object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.refreshPolicy.markDirty() }
+            }
+        }
     }
 
     deinit {
+        for observer in notificationObservers { NotificationCenter.default.removeObserver(observer) }
         setWantsNotifications?(false)
         if let handle { dlclose(handle) }
     }
 
     func update() {
-        guard !pending, let getPID, let getInfo else { return }
+        guard !pending, refreshPolicy.shouldRefresh(at: Date()), let getPID, let getInfo else { return }
         pending = true
         receivedPID = nil
         receivedInfo = nil
@@ -133,26 +228,62 @@ final class MediaRemoteBridge {
 }
 
 @MainActor
+struct KugouSnapshotRetention {
+    private var lastValid: (snapshot: PlayerSnapshot, observedAt: Date)?
+
+    mutating func resolve(candidate: PlayerSnapshot, audible: Bool?, now: Date = Date()) -> PlayerSnapshot {
+        if candidate.track != nil {
+            lastValid = (candidate, now)
+            return candidate
+        }
+        guard case .connecting = candidate.availability, let lastValid else { return candidate }
+
+        var retained = lastValid.snapshot
+        retained.availability = .ready
+        if audible == true {
+            retained.progress = lastValid.snapshot.progress + max(0, now.timeIntervalSince(lastValid.observedAt))
+            retained.isPlaying = true
+        } else if audible == false {
+            retained.isPlaying = false
+        }
+        return retained
+    }
+
+    mutating func reset() { lastValid = nil }
+}
+
+@MainActor
 final class KugouPlayerAdapter: PlayerAdapter {
     static let bundleIdentifier = PlayerBundleIdentifiers.kugou
     let kind: PlayerKind? = .kugou
     let bridge: MediaRemoteBridge
     private let accessibility: KugouAccessibilityBridge
-    private var lastSnapshot: PlayerSnapshot?
+    private let audioActivity: AudioPlaybackActivityProviding
+    private let applications: PlayerApplicationRegistry
+    private var retention = KugouSnapshotRetention()
 
-    init(bridge: MediaRemoteBridge, accessibility: KugouAccessibilityBridge? = nil) {
+    init(
+        bridge: MediaRemoteBridge,
+        accessibility: KugouAccessibilityBridge? = nil,
+        audioActivity: AudioPlaybackActivityProviding? = nil,
+        applications: PlayerApplicationRegistry? = nil
+    ) {
         self.bridge = bridge
         self.accessibility = accessibility ?? KugouAccessibilityBridge()
+        self.audioActivity = audioActivity ?? CoreAudioPlaybackActivity()
+        self.applications = applications ?? PlayerApplicationRegistry()
     }
 
-    var isRunning: Bool { !NSRunningApplication.runningApplications(withBundleIdentifier: Self.bundleIdentifier).isEmpty }
+    var isRunning: Bool { !applications.processIdentifiers(for: Self.bundleIdentifier).isEmpty }
 
     func snapshot() -> PlayerSnapshot {
         bridge.update()
-        guard isRunning else { lastSnapshot = nil; return .init(availability: .notRunning, player: .kugou) }
+        guard isRunning else { retention.reset(); return .init(availability: .notRunning, player: .kugou) }
         guard bridge.isAvailable else {
             return .init(availability: .incompatible("当前 macOS 无法访问系统播放信息"), player: .kugou)
         }
+        let processIdentifiers = applications.processIdentifiers(for: Self.bundleIdentifier)
+        let audible = audioActivity.isRunningOutput(bundleIdentifier: Self.bundleIdentifier, processIdentifiers: processIdentifiers)
         if let state = bridge.state, state.bundleIdentifier == Self.bundleIdentifier {
             let track = TrackIdentity(
                 title: state.title,
@@ -168,21 +299,19 @@ final class KugouPlayerAdapter: PlayerAdapter {
                 isPlaying: state.rate > 0,
                 player: .kugou
             )
-            lastSnapshot = snapshot
-            return snapshot
+            return retention.resolve(candidate: snapshot, audible: state.rate > 0 ? true : audible)
         }
-        guard let process = NSRunningApplication.runningApplications(withBundleIdentifier: Self.bundleIdentifier).first else {
+        guard let processIdentifier = processIdentifiers.first else {
             return .init(availability: .notRunning, player: .kugou)
         }
-        let snapshot = accessibility.snapshot(processIdentifier: process.processIdentifier)
-        if snapshot.track != nil { lastSnapshot = snapshot }
-        return snapshot
+        let snapshot = accessibility.snapshot(processIdentifier: processIdentifier)
+        return retention.resolve(candidate: snapshot, audible: audible)
     }
 
     func perform(_ command: PlayerCommand) throws {
-        guard let process = NSRunningApplication.runningApplications(withBundleIdentifier: Self.bundleIdentifier).first else { throw AXPlayerError.notRunning }
+        guard let processIdentifier = applications.processIdentifiers(for: Self.bundleIdentifier).first else { throw AXPlayerError.notRunning }
         if bridge.perform(command, expectedBundleIdentifier: Self.bundleIdentifier) { return }
-        guard accessibility.perform(command, processIdentifier: process.processIdentifier) else { throw AXPlayerError.controlUnavailable }
+        guard accessibility.perform(command, processIdentifier: processIdentifier) else { throw AXPlayerError.controlUnavailable }
     }
 
     func requestPermission() { accessibility.requestPermission() }
@@ -196,6 +325,7 @@ final class AutomaticPlayerAdapter: PlayerAdapter {
     private let netease: PlayerAdapter
     private let kugou: PlayerAdapter
     private let audioActivity: AudioPlaybackActivityProviding
+    private let applications: PlayerApplicationRegistry
     private var selected: PlayerAdapter?
 
     init(
@@ -205,10 +335,13 @@ final class AutomaticPlayerAdapter: PlayerAdapter {
         audioActivity: AudioPlaybackActivityProviding? = nil
     ) {
         let bridge = mediaRemote ?? MediaRemoteBridge()
+        let activity = audioActivity ?? CoreAudioPlaybackActivity()
+        let registry = PlayerApplicationRegistry()
         self.mediaRemote = bridge
-        self.netease = netease ?? NetEaseAXPlayerAdapter()
-        self.kugou = kugou ?? KugouPlayerAdapter(bridge: bridge)
-        self.audioActivity = audioActivity ?? CoreAudioPlaybackActivity()
+        self.netease = netease ?? NetEaseAXPlayerAdapter(applications: registry)
+        self.kugou = kugou ?? KugouPlayerAdapter(bridge: bridge, audioActivity: activity, applications: registry)
+        self.audioActivity = activity
+        self.applications = registry
     }
 
     var isRunning: Bool { netease.isRunning || kugou.isRunning }
@@ -216,27 +349,31 @@ final class AutomaticPlayerAdapter: PlayerAdapter {
 
     func snapshot() -> PlayerSnapshot {
         mediaRemote.update()
+        let neteaseProcessIdentifiers = applications.processIdentifiers(for: PlayerBundleIdentifiers.netease)
+        let kugouProcessIdentifiers = applications.processIdentifiers(for: PlayerBundleIdentifiers.kugou)
+        let neteaseRunning = netease.isRunning
+        let kugouRunning = kugou.isRunning
         let frontmostBundle = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         // A paused app can remain MediaRemote's owner after another player has
         // started through its own internal engine. Only treat MediaRemote as an
         // active signal while it reports a positive playback rate.
         let activeBundle = mediaRemote.state.flatMap { $0.rate > 0 ? $0.bundleIdentifier : nil }
-        let neteaseAudible = netease.isRunning ? audioActivity.isRunningOutput(bundleIdentifier: PlayerBundleIdentifiers.netease) : false
-        let kugouAudible = kugou.isRunning ? audioActivity.isRunningOutput(bundleIdentifier: PlayerBundleIdentifiers.kugou) : false
-        let shouldProbeNetEase = netease.isRunning && (
+        let neteaseAudible = neteaseRunning ? audioActivity.isRunningOutput(bundleIdentifier: PlayerBundleIdentifiers.netease, processIdentifiers: neteaseProcessIdentifiers) : false
+        let kugouAudible = kugouRunning ? audioActivity.isRunningOutput(bundleIdentifier: PlayerBundleIdentifiers.kugou, processIdentifiers: kugouProcessIdentifiers) : false
+        let shouldProbeNetEase = neteaseRunning && (
             selected?.kind == .netease ||
             neteaseAudible == true ||
             frontmostBundle == PlayerBundleIdentifiers.netease ||
             activeBundle == PlayerBundleIdentifiers.netease
         )
         let neteaseProbe = shouldProbeNetEase ? netease.snapshot() : nil
-        let kugouProbe = kugou.isRunning ? kugou.snapshot() : nil
+        let kugouProbe = kugouRunning ? kugou.snapshot() : nil
         let choice = AutomaticPlayerSelection.choose(
             activeBundleIdentifier: activeBundle,
             frontmostBundleIdentifier: frontmostBundle,
             previous: selected?.kind,
-            neteaseRunning: netease.isRunning,
-            kugouRunning: kugou.isRunning,
+            neteaseRunning: neteaseRunning,
+            kugouRunning: kugouRunning,
             neteaseAudible: neteaseAudible,
             kugouAudible: kugouAudible,
             neteasePlaying: neteaseProbe?.isPlaying == true,

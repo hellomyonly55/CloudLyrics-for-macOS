@@ -62,9 +62,14 @@ final class NetEaseAXPlayerAdapter: PlayerAdapter {
     private let localState = NetEaseLocalStateBridge()
     private let cefBridge = NetEaseCEFBridge()
     private let launchCoordinator = NetEaseLaunchCoordinator()
+    private let applications: PlayerApplicationRegistry
+
+    init(applications: PlayerApplicationRegistry? = nil) {
+        self.applications = applications ?? PlayerApplicationRegistry()
+    }
 
     let kind: PlayerKind? = .netease
-    var isRunning: Bool { !NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).isEmpty }
+    var isRunning: Bool { !applications.processIdentifiers(for: bundleIdentifier).isEmpty }
     var connectionState: NetEaseConnectionState { launchCoordinator.state }
 
     func requestPermission() {
@@ -72,7 +77,7 @@ final class NetEaseAXPlayerAdapter: PlayerAdapter {
     }
 
     func snapshot() -> PlayerSnapshot {
-        let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
+        let running = applications.runningApplications(for: bundleIdentifier)
         launchCoordinator.update(runningApplications: running, cefConnected: cefBridge.isConnected) { [weak self] in self?.cefBridge.invalidate() }
         guard !running.isEmpty else { return snapshotForConnectionState() }
         cefBridge.update()
@@ -85,7 +90,7 @@ final class NetEaseAXPlayerAdapter: PlayerAdapter {
     }
 
     func perform(_ command: PlayerCommand) throws {
-        guard NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).first != nil else { throw AXPlayerError.notRunning }
+        guard !applications.processIdentifiers(for: bundleIdentifier).isEmpty else { throw AXPlayerError.notRunning }
         guard cefBridge.perform(command) else { throw AXPlayerError.controlUnavailable }
     }
 

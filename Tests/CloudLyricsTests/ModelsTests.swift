@@ -126,6 +126,17 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(state.currentProgress, 12, accuracy: 0.1)
     }
 
+    func testMediaRemoteRefreshPolicyUsesNotificationsAndSafetyRefresh() {
+        var policy = MediaRemoteRefreshPolicy(safetyInterval: 0.5)
+        let start = Date(timeIntervalSince1970: 10_000)
+        XCTAssertTrue(policy.shouldRefresh(at: start))
+        XCTAssertFalse(policy.shouldRefresh(at: start.addingTimeInterval(0.2)))
+        policy.markDirty()
+        XCTAssertTrue(policy.shouldRefresh(at: start.addingTimeInterval(0.21)))
+        XCTAssertFalse(policy.shouldRefresh(at: start.addingTimeInterval(0.4)))
+        XCTAssertTrue(policy.shouldRefresh(at: start.addingTimeInterval(0.8)))
+    }
+
     func testTranslationModeUsesTranslationWhenAvailable() {
         let document = lyrics([.init(time: 0, text: "原文", translation: "Translation"), .init(time: 5, text: "下一句")])
         XCTAssertEqual(LyricPresentation.make(document: document, index: 0, mode: .translation), .init(primary: "原文", secondary: "Translation"))
