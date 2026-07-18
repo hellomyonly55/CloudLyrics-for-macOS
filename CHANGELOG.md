@@ -4,6 +4,21 @@ All notable changes to CloudLyrics are documented in this file.
 
 ## Unreleased
 
+## [0.2.1] - 2026-07-18
+
+### Fixed
+
+- Retained the last valid KuGou playback snapshot when comments or image overlays temporarily hide the playback bar.
+- Prioritized the persistent KuGou playback controls during Accessibility discovery.
+
+### Performance
+
+- Cached KuGou playback Accessibility nodes and moved fallback discovery to a serialized background queue.
+- Replaced unconditional menu-bar redraws with coalesced state-driven updates and adaptive player polling.
+- Cached CoreAudio activity, tracked player processes through workspace notifications, and reduced redundant MediaRemote requests.
+- Indexed the local KuGou lyrics directory and invalidated it when directory contents change.
+- Reduced measured KuGou playback CPU usage from approximately 5.5% to 0.835% over a 60-second sample.
+
 ## [0.2.0] - 2026-07-17
 
 ### Added
