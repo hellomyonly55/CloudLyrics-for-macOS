@@ -36,6 +36,48 @@ final class PlayerAdapterTests: XCTestCase {
         let adapter = AutomaticPlayerAdapter(netease: netease, kugou: kugou, audioActivity: activity)
 
         XCTAssertEqual(adapter.snapshot().player, .netease)
+        XCTAssertEqual(kugou.snapshotCalls, 0)
+        XCTAssertEqual(adapter.snapshot().player, .netease)
+        XCTAssertEqual(kugou.snapshotCalls, 0)
+    }
+
+    func testAutomaticAdapterThrottlesIdleKugouButProbesImmediatelyWhenAudible() {
+        var now = Date(timeIntervalSince1970: 10_000)
+        let idleKugou = MockPlayerAdapter(kind: .kugou, running: true)
+        let idleActivity = MockAudioPlaybackActivity(values: [PlayerBundleIdentifiers.kugou: false])
+        let idleAdapter = AutomaticPlayerAdapter(
+            netease: MockPlayerAdapter(kind: .netease, running: false),
+            kugou: idleKugou,
+            audioActivity: idleActivity,
+            now: { now }
+        )
+
+        XCTAssertEqual(idleAdapter.snapshot().player, .kugou)
+        XCTAssertEqual(idleAdapter.snapshot().player, .kugou)
+        XCTAssertEqual(idleKugou.snapshotCalls, 1)
+        now.addTimeInterval(AutomaticPlayerAdapter.kugouActivationProbeInterval)
+        _ = idleAdapter.snapshot()
+        XCTAssertEqual(idleKugou.snapshotCalls, 2)
+        now.addTimeInterval(AutomaticPlayerAdapter.kugouActivationProbeInterval)
+        _ = idleAdapter.snapshot()
+        XCTAssertEqual(idleKugou.snapshotCalls, 3)
+        now.addTimeInterval(AutomaticPlayerAdapter.kugouActivationProbeInterval)
+        _ = idleAdapter.snapshot()
+        XCTAssertEqual(idleKugou.snapshotCalls, 3)
+        now.addTimeInterval(AutomaticPlayerAdapter.kugouIdleProbeInterval)
+        _ = idleAdapter.snapshot()
+        XCTAssertEqual(idleKugou.snapshotCalls, 4)
+
+        let audibleKugou = MockPlayerAdapter(kind: .kugou, running: true)
+        let audibleActivity = MockAudioPlaybackActivity(values: [PlayerBundleIdentifiers.kugou: true])
+        let audibleAdapter = AutomaticPlayerAdapter(
+            netease: MockPlayerAdapter(kind: .netease, running: false),
+            kugou: audibleKugou,
+            audioActivity: audibleActivity
+        )
+        _ = audibleAdapter.snapshot()
+        _ = audibleAdapter.snapshot()
+        XCTAssertEqual(audibleKugou.snapshotCalls, 2)
     }
 
     func testKugouRetainsLastSnapshotWhileOverlayHidesPlaybackBar() {
@@ -91,6 +133,7 @@ private final class MockPlayerAdapter: PlayerAdapter {
     let kind: PlayerKind?
     var isRunning: Bool
     var commands: [PlayerCommand] = []
+    var snapshotCalls = 0
 
     init(kind: PlayerKind, running: Bool) {
         self.kind = kind
@@ -98,7 +141,8 @@ private final class MockPlayerAdapter: PlayerAdapter {
     }
 
     func snapshot() -> PlayerSnapshot {
-        .init(
+        snapshotCalls += 1
+        return .init(
             availability: isRunning ? .ready : .notRunning,
             track: isRunning ? .init(title: "Song", artist: "Artist", player: kind ?? .netease) : nil,
             player: kind

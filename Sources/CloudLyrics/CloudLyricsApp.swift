@@ -15,6 +15,11 @@ enum CloudLyricsApp {
             fflush(stdout)
             Darwin.exit(EXIT_SUCCESS)
         }
+        if CommandLine.arguments.contains("--diagnose-lyrics-stream") {
+            diagnoseLyricsStream()
+            fflush(stdout)
+            Darwin.exit(EXIT_SUCCESS)
+        }
         let application = NSApplication.shared
         let delegate = AppDelegate()
         retainedDelegate = delegate
@@ -27,9 +32,11 @@ enum CloudLyricsApp {
 
     private static func diagnoseNowPlaying() {
         let adapter = AutomaticPlayerAdapter()
+        let minimumObservationDeadline = Date().addingTimeInterval(1.8)
         let deadline = Date().addingTimeInterval(3)
         var latest = adapter.snapshot()
-        while Date() < deadline, latest.track == nil || latest.track?.title == "正在获取歌曲信息…" {
+        while Date() < deadline,
+              Date() < minimumObservationDeadline || latest.track == nil || latest.track?.title == "正在获取歌曲信息…" {
             RunLoop.main.run(until: Date().addingTimeInterval(0.2))
             latest = adapter.snapshot()
         }
@@ -58,6 +65,30 @@ enum CloudLyricsApp {
             case .incompatible(let message): print("UNAVAILABLE\t\(message)")
             case .ready: print("READY_WITHOUT_TRACK")
             }
+        }
+    }
+
+    private static func diagnoseLyricsStream() {
+        let viewModel = AppViewModel()
+        let startedAt = Date()
+        let deadline = startedAt.addingTimeInterval(30)
+        var lastSignature = ""
+        var lastProgress: TimeInterval?
+
+        while Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            let snapshot = viewModel.snapshot
+            let lines = viewModel.currentLines
+            let signature = "\(snapshot.track?.normalizedKey ?? "none")|\(lines.0)|\(lines.1 ?? "")"
+            let regressed = lastProgress.map { snapshot.progress + 0.05 < $0 } ?? false
+            if signature != lastSignature || regressed {
+                let elapsed = Date().timeIntervalSince(startedAt)
+                let primary = lines.0.replacingOccurrences(of: "\t", with: " ")
+                let secondary = (lines.1 ?? "").replacingOccurrences(of: "\t", with: " ")
+                print(String(format: "%.3f\t%.3f\t%@\t%@\t%@", elapsed, snapshot.progress, regressed ? "REGRESSION" : "LINE", primary, secondary))
+                lastSignature = signature
+            }
+            lastProgress = snapshot.progress
         }
     }
 }

@@ -4,6 +4,25 @@ All notable changes to CloudLyrics are documented in this file.
 
 ## Unreleased
 
+## [0.2.2] - 2026-08-01
+
+### Fixed
+
+- Prevented delayed NetEase progress writes and transient playback-state changes from pulling interpolated playback backward across lyric boundaries, and clamped interpolation at the track end until NetEase reports the next track or repeat.
+- Ignored one-off stale backward `lastPlaying` records exposed by LevelDB compaction, while still accepting confirmed seeks, same-track repeats, and paused seeks.
+
+### Changed
+
+- Replaced NetEase CEF/webpack injection with System Now Playing plus read-only decoding of NetEase's exact local `lastPlaying` progress, so NetEase no longer requires debugging arguments or an automatic restart and manual seeks are re-synchronized on the next native update.
+
+### Performance
+
+- Removed NetEase WebSocket polling and webpack module scans. The local fallback checks LevelDB file metadata at most twice per second, reads only a bounded log tail when it changes, caches track metadata, and interpolates solely between exact native progress observations.
+
+### Security
+
+- Removed the local NetEase debugging endpoint and renderer-process JavaScript injection.
+
 ## [0.2.1] - 2026-07-18
 
 ### Fixed

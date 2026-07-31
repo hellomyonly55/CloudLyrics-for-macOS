@@ -99,7 +99,7 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(snapshot.normalizedProgress, 161, accuracy: 0.001)
     }
 
-    func testKugouLyricsUseHalfSecondLeadWithoutAffectingNetEase() {
+    func testPlayerSpecificLyricLeadCompensatesDisplayLatency() {
         let track = TrackIdentity(title: "t", artist: "a", duration: 203, player: .kugou)
         let kugou = PlayerSnapshot(availability: .ready, track: track, progress: 10, isPlaying: true, player: .kugou)
         let netease = PlayerSnapshot(
@@ -110,7 +110,18 @@ final class ModelsTests: XCTestCase {
             player: .netease
         )
         XCTAssertEqual(kugou.lyricProgress, 10.5, accuracy: 0.001)
-        XCTAssertEqual(netease.lyricProgress, 10, accuracy: 0.001)
+        XCTAssertEqual(netease.lyricProgress, 10.5, accuracy: 0.001)
+    }
+
+    func testNetEaseLyricLeadDoesNotAdvancePausedPlayback() {
+        let snapshot = PlayerSnapshot(
+            availability: .ready,
+            track: .init(title: "t", artist: "a", duration: 203, player: .netease),
+            progress: 10,
+            isPlaying: false,
+            player: .netease
+        )
+        XCTAssertEqual(snapshot.lyricProgress, 10, accuracy: 0.001)
     }
 
     func testSystemProgressAdvancesWithoutMediaTimestamp() {
@@ -154,20 +165,246 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(LyricPresentation.make(document: document, index: 0, mode: .nextLine), .init(primary: "当前句", secondary: "下一句"))
     }
 
-    func testNetEaseCommandsTargetOnlyNetEaseDOM() {
-        XCTAssertEqual(NetEaseCEFCommand.selector(for: .previous), "[data-log*='btn_pc_previous']")
-        XCTAssertEqual(NetEaseCEFCommand.selector(for: .playPause), "#btn_pc_minibar_play")
-        XCTAssertEqual(NetEaseCEFCommand.selector(for: .next), "[data-log*='btn_pc_next']")
-        XCTAssertTrue(NetEaseCEFCommand.expression(for: .next).contains("document.querySelector"))
+    func testSystemNowPlayingBuildsNetEaseSnapshotWithoutCEFState() {
+        let state = SystemNowPlayingState(
+            processIdentifier: 42,
+            title: "Song",
+            artist: "Artist",
+            duration: 180,
+            elapsed: 12,
+            rate: 0,
+            timestamp: nil,
+            sourceID: "12345",
+            observedAt: Date(timeIntervalSince1970: 10_000)
+        )
+
+        let snapshot = state.snapshot(player: .netease, audible: true)
+        XCTAssertEqual(snapshot.availability, .ready)
+        XCTAssertEqual(snapshot.track, .init(title: "Song", artist: "Artist", duration: 180, sourceID: "12345", player: .netease))
+        XCTAssertEqual(snapshot.progress, 12, accuracy: 0.001)
+        XCTAssertTrue(snapshot.isPlaying)
+        XCTAssertEqual(snapshot.player, .netease)
     }
 
-    func testNetEaseCEFEndpointAcceptsOnlyExpectedLocalWebSocket() {
-        XCTAssertNotNil(NetEaseCEFEndpoint.validatedWebSocketURL(from: "ws://127.0.0.1:9222/devtools/page/123"))
-        XCTAssertNil(NetEaseCEFEndpoint.validatedWebSocketURL(from: "ws://localhost:9222/devtools/page/123"))
-        XCTAssertNil(NetEaseCEFEndpoint.validatedWebSocketURL(from: "ws://192.168.1.2:9222/devtools/page/123"))
-        XCTAssertNil(NetEaseCEFEndpoint.validatedWebSocketURL(from: "ws://127.0.0.1:9333/devtools/page/123"))
-        XCTAssertNil(NetEaseCEFEndpoint.validatedWebSocketURL(from: "wss://127.0.0.1:9222/devtools/page/123"))
-        XCTAssertNil(NetEaseCEFEndpoint.validatedWebSocketURL(from: "not a url"))
+    func testNetEaseLastPlayingDecoderReadsExactNativeProgress() throws {
+        let encoded = "rZkiW6jJrOlRkCHQA/EsJ0HewSOh0BwHO2coy/ZELY4Dek+Uvk+dHTzDdHVj8UCwKg+K92TaaWgLE/DH8G3a2+HVurJhcZDPVjYXD968Ji0F9eFh17/H1RbbCT/9nCfNx/Gzjw1GoKv6+n3IJvel6P2HrcXkmwIesuwb4Ghmuao="
+        let state = try XCTUnwrap(NetEaseLastPlayingDecoder.decode(base64: encoded))
+        XCTAssertEqual(state.current, 76, accuracy: 0.001)
+        XCTAssertEqual(state.resourceDuration, 236)
+        XCTAssertEqual(state.resourceID, "3343899755")
+        XCTAssertEqual(state.trackID, "3343899755")
+    }
+
+    func testNetEaseLastPlayingDecoderFindsValueInsideLevelDBBytes() throws {
+        let encoded = "rZkiW6jJrOlRkCHQA/EsJ0HewSOh0BwHO2coy/ZELY4Dek+Uvk+dHTzDdHVj8UCwKg+K92TaaWgLE/DH8G3a2+HVurJhcZDPVjYXD968Ji0F9eFh17/H1RbbCT/9nCfNx/Gzjw1GoKv6+n3IJvel6P2HrcXkmwIesuwb4Ghmuao="
+        let bytes = Data("\u{1}lastPlayingT\(encoded)C\u{0}META:orpheus://orpheus".utf8)
+        let state = try XCTUnwrap(NetEaseLastPlayingDecoder.states(in: bytes).last?.state)
+        XCTAssertEqual(state.current, 76, accuracy: 0.001)
+        XCTAssertEqual(state.resourceID, "3343899755")
+    }
+
+    func testNetEaseLiveLogStateIsNotReplacedByStaleCompactedTable() {
+        var cache = NetEaseLastPlayingStateCache()
+        let bootstrap = NetEaseLastPlayingState(
+            current: 10,
+            resourceDuration: 100,
+            resourceID: "1",
+            trackID: "1"
+        )
+        let live = NetEaseLastPlayingState(
+            current: 80,
+            resourceDuration: 100,
+            resourceID: "1",
+            trackID: "1"
+        )
+        let staleCompactedValue = NetEaseLastPlayingState(
+            current: 12,
+            resourceDuration: 100,
+            resourceID: "1",
+            trackID: "1"
+        )
+
+        XCTAssertEqual(cache.bootstrapFromTable(bootstrap).current, 10)
+        XCTAssertEqual(cache.observeLog(live).current, 80)
+        XCTAssertEqual(cache.bootstrapFromTable(staleCompactedValue).current, 80)
+        XCTAssertEqual(cache.state?.current, 80)
+    }
+
+    func testNetEaseProgressEstimatorFollowsExactProgressAndSeek() {
+        var estimator = NetEaseProgressEstimator()
+        let start = Date(timeIntervalSince1970: 10_000)
+        XCTAssertEqual(
+            estimator.update(songID: "1", duration: 100, exactProgress: 8, isPlaying: true, now: start),
+            8,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            estimator.update(songID: "1", duration: 100, exactProgress: 8, isPlaying: true, now: start.addingTimeInterval(0.5)),
+            8.5,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            estimator.update(songID: "1", duration: 100, exactProgress: 9, isPlaying: true, now: start.addingTimeInterval(1)),
+            9,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            estimator.update(songID: "1", duration: 100, exactProgress: 40, isPlaying: true, now: start.addingTimeInterval(1.25)),
+            40,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(
+            estimator.update(songID: "1", duration: 100, exactProgress: 40, isPlaying: false, now: start.addingTimeInterval(1.5)),
+            40,
+            accuracy: 0.001
+        )
+    }
+
+    func testNetEaseProgressDoesNotFlashBackAcrossLyricBoundary() {
+        var estimator = NetEaseProgressEstimator()
+        let start = Date(timeIntervalSince1970: 10_000)
+        let document = LyricsDocument(
+            track: .init(title: "t", artist: "a"),
+            lines: [.init(time: 0, text: "previous"), .init(time: 10.1, text: "next")],
+            source: "test"
+        )
+
+        _ = estimator.update(songID: "1", duration: 100, exactProgress: 9, isPlaying: true, now: start)
+        let interpolated = estimator.update(
+            songID: "1",
+            duration: 100,
+            exactProgress: 9,
+            isPlaying: true,
+            now: start.addingTimeInterval(1.2)
+        )
+        let delayedNativeSample = estimator.update(
+            songID: "1",
+            duration: 100,
+            exactProgress: 10,
+            isPlaying: true,
+            now: start.addingTimeInterval(1.21)
+        )
+
+        XCTAssertEqual(interpolated, 10.2, accuracy: 0.001)
+        XCTAssertEqual(delayedNativeSample, interpolated, accuracy: 0.001)
+        XCTAssertEqual(document.lineIndex(at: interpolated), 1)
+        XCTAssertEqual(document.lineIndex(at: delayedNativeSample), 1)
+
+        let unconfirmedBackwardSample = estimator.update(
+            songID: "1",
+            duration: 100,
+            exactProgress: 4,
+            isPlaying: true,
+            now: start.addingTimeInterval(1.4)
+        )
+        XCTAssertGreaterThanOrEqual(unconfirmedBackwardSample, delayedNativeSample)
+        let confirmedBackwardSeek = estimator.update(
+            songID: "1",
+            duration: 100,
+            exactProgress: 5,
+            isPlaying: true,
+            now: start.addingTimeInterval(2.4)
+        )
+        XCTAssertEqual(confirmedBackwardSeek, 5, accuracy: 0.001)
+    }
+
+    func testNetEaseIgnoresOneOffStaleBackwardLevelDBRecord() {
+        var estimator = NetEaseProgressEstimator()
+        let start = Date(timeIntervalSince1970: 10_000)
+        _ = estimator.update(songID: "1", duration: 100, exactProgress: 20, isPlaying: true, now: start)
+        let beforeStaleRecord = estimator.update(
+            songID: "1",
+            duration: 100,
+            exactProgress: 20,
+            isPlaying: true,
+            now: start.addingTimeInterval(0.8)
+        )
+        let staleRecord = estimator.update(
+            songID: "1",
+            duration: 100,
+            exactProgress: 4,
+            isPlaying: true,
+            now: start.addingTimeInterval(0.81)
+        )
+        let recoveredNativeValue = estimator.update(
+            songID: "1",
+            duration: 100,
+            exactProgress: 21,
+            isPlaying: true,
+            now: start.addingTimeInterval(1)
+        )
+
+        XCTAssertGreaterThanOrEqual(staleRecord, beforeStaleRecord)
+        XCTAssertGreaterThanOrEqual(recoveredNativeValue, staleRecord)
+    }
+
+    func testNetEaseAcceptsPausedBackwardSeekImmediately() {
+        var estimator = NetEaseProgressEstimator()
+        let start = Date(timeIntervalSince1970: 10_000)
+        _ = estimator.update(songID: "1", duration: 100, exactProgress: 20, isPlaying: true, now: start)
+        XCTAssertEqual(
+            estimator.update(
+                songID: "1",
+                duration: 100,
+                exactProgress: 4,
+                isPlaying: false,
+                now: start.addingTimeInterval(0.5)
+            ),
+            4,
+            accuracy: 0.001
+        )
+    }
+
+    func testNetEasePauseDoesNotRewindToDelayedNativeWrite() {
+        var estimator = NetEaseProgressEstimator()
+        let start = Date(timeIntervalSince1970: 10_000)
+        _ = estimator.update(songID: "1", duration: 100, exactProgress: 10, isPlaying: true, now: start)
+        let interpolated = estimator.update(
+            songID: "1",
+            duration: 100,
+            exactProgress: 10,
+            isPlaying: true,
+            now: start.addingTimeInterval(3)
+        )
+        let stoppedWithStaleValue = estimator.update(
+            songID: "1",
+            duration: 100,
+            exactProgress: 10,
+            isPlaying: false,
+            now: start.addingTimeInterval(3.1)
+        )
+        let delayedPausedWrite = estimator.update(
+            songID: "1",
+            duration: 100,
+            exactProgress: 11,
+            isPlaying: false,
+            now: start.addingTimeInterval(3.2)
+        )
+
+        XCTAssertEqual(interpolated, 13, accuracy: 0.001)
+        XCTAssertEqual(stoppedWithStaleValue, interpolated, accuracy: 0.001)
+        XCTAssertEqual(delayedPausedWrite, interpolated, accuracy: 0.001)
+    }
+
+    func testNetEaseInterpolationClampsAtTrackEndUntilNativeTrackChange() {
+        var estimator = NetEaseProgressEstimator()
+        let start = Date(timeIntervalSince1970: 10_000)
+        _ = estimator.update(songID: "1", duration: 10, exactProgress: 9, isPlaying: true, now: start)
+        XCTAssertEqual(
+            estimator.update(songID: "1", duration: 10, exactProgress: 9, isPlaying: true, now: start.addingTimeInterval(2)),
+            10,
+            accuracy: 0.001
+        )
+    }
+
+    func testNetEasePlaybackActivityPrefersCoreAudioAndUsesStaleFallback() {
+        var resolver = NetEasePlaybackActivityResolver()
+        let start = Date(timeIntervalSince1970: 10_000)
+        XCTAssertTrue(resolver.resolve(songID: "1", exactProgress: 10, audible: true, now: start))
+        XCTAssertTrue(resolver.resolve(songID: "1", exactProgress: 10, audible: true, now: start.addingTimeInterval(20)))
+        XCTAssertTrue(resolver.resolve(songID: "1", exactProgress: 11, audible: nil, now: start.addingTimeInterval(20.1)))
+        XCTAssertFalse(resolver.resolve(songID: "1", exactProgress: 11, audible: nil, now: start.addingTimeInterval(26.7)))
+        XCTAssertFalse(resolver.resolve(songID: "1", exactProgress: 11, audible: false, now: start.addingTimeInterval(26.8)))
     }
 
     private func lyrics(_ lines: [TimedLyricLine]) -> LyricsDocument {

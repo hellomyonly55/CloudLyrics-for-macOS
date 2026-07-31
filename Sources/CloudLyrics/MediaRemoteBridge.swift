@@ -87,6 +87,22 @@ struct SystemNowPlayingState: Equatable {
         let advanced = rate > 0 ? max(0, Date().timeIntervalSince(timestamp ?? observedAt)) * rate : 0
         return max(0, elapsed + advanced)
     }
+
+    func snapshot(player: PlayerKind, audible: Bool?) -> PlayerSnapshot {
+        .init(
+            availability: .ready,
+            track: .init(
+                title: title,
+                artist: artist,
+                duration: duration,
+                sourceID: sourceID,
+                player: player
+            ),
+            progress: currentProgress,
+            isPlaying: rate > 0 || audible == true,
+            player: player
+        )
+    }
 }
 
 struct MediaRemoteRefreshPolicy {
@@ -228,7 +244,7 @@ final class MediaRemoteBridge {
 }
 
 @MainActor
-struct KugouSnapshotRetention {
+struct PlayerSnapshotRetention {
     private var lastValid: (snapshot: PlayerSnapshot, observedAt: Date)?
 
     mutating func resolve(candidate: PlayerSnapshot, audible: Bool?, now: Date = Date()) -> PlayerSnapshot {
@@ -251,6 +267,8 @@ struct KugouSnapshotRetention {
 
     mutating func reset() { lastValid = nil }
 }
+
+typealias KugouSnapshotRetention = PlayerSnapshotRetention
 
 @MainActor
 final class KugouPlayerAdapter: PlayerAdapter {
@@ -285,21 +303,8 @@ final class KugouPlayerAdapter: PlayerAdapter {
         let processIdentifiers = applications.processIdentifiers(for: Self.bundleIdentifier)
         let audible = audioActivity.isRunningOutput(bundleIdentifier: Self.bundleIdentifier, processIdentifiers: processIdentifiers)
         if let state = bridge.state, state.bundleIdentifier == Self.bundleIdentifier {
-            let track = TrackIdentity(
-                title: state.title,
-                artist: state.artist,
-                duration: state.duration,
-                sourceID: state.sourceID,
-                player: .kugou
-            )
-            let snapshot = PlayerSnapshot(
-                availability: .ready,
-                track: track,
-                progress: state.currentProgress,
-                isPlaying: state.rate > 0,
-                player: .kugou
-            )
-            return retention.resolve(candidate: snapshot, audible: state.rate > 0 ? true : audible)
+            let snapshot = state.snapshot(player: .kugou, audible: audible)
+            return retention.resolve(candidate: snapshot, audible: snapshot.isPlaying ? true : audible)
         }
         guard let processIdentifier = processIdentifiers.first else {
             return .init(availability: .notRunning, player: .kugou)
@@ -320,28 +325,37 @@ final class KugouPlayerAdapter: PlayerAdapter {
 @MainActor
 final class AutomaticPlayerAdapter: PlayerAdapter {
     static let netEaseBundleIdentifier = PlayerBundleIdentifiers.netease
+    static let kugouIdleProbeInterval: TimeInterval = 5
+    static let kugouActivationProbeInterval: TimeInterval = 0.75
+    static let kugouActivationProbeCount = 2
     let kind: PlayerKind? = nil
     private let mediaRemote: MediaRemoteBridge
     private let netease: PlayerAdapter
     private let kugou: PlayerAdapter
     private let audioActivity: AudioPlaybackActivityProviding
     private let applications: PlayerApplicationRegistry
+    private let now: () -> Date
     private var selected: PlayerAdapter?
+    private var lastKugouProbeAt: Date?
+    private var lastKugouSnapshot: PlayerSnapshot?
+    private var remainingKugouActivationProbes = 0
 
     init(
         mediaRemote: MediaRemoteBridge? = nil,
         netease: PlayerAdapter? = nil,
         kugou: PlayerAdapter? = nil,
-        audioActivity: AudioPlaybackActivityProviding? = nil
+        audioActivity: AudioPlaybackActivityProviding? = nil,
+        now: @escaping () -> Date = Date.init
     ) {
         let bridge = mediaRemote ?? MediaRemoteBridge()
         let activity = audioActivity ?? CoreAudioPlaybackActivity()
         let registry = PlayerApplicationRegistry()
         self.mediaRemote = bridge
-        self.netease = netease ?? NetEaseAXPlayerAdapter(applications: registry)
+        self.netease = netease ?? NetEasePlayerAdapter(bridge: bridge, audioActivity: activity, applications: registry)
         self.kugou = kugou ?? KugouPlayerAdapter(bridge: bridge, audioActivity: activity, applications: registry)
         self.audioActivity = activity
         self.applications = registry
+        self.now = now
     }
 
     var isRunning: Bool { netease.isRunning || kugou.isRunning }
@@ -367,7 +381,42 @@ final class AutomaticPlayerAdapter: PlayerAdapter {
             activeBundle == PlayerBundleIdentifiers.netease
         )
         let neteaseProbe = shouldProbeNetEase ? netease.snapshot() : nil
-        let kugouProbe = kugouRunning ? kugou.snapshot() : nil
+        let currentTime = now()
+        let shouldProbeKugou = shouldProbeKugou(
+            running: kugouRunning,
+            neteaseRunning: neteaseRunning,
+            neteaseAudible: neteaseAudible,
+            kugouAudible: kugouAudible,
+            frontmostBundle: frontmostBundle,
+            activeBundle: activeBundle,
+            now: currentTime
+        )
+        let kugouProbe: PlayerSnapshot?
+        if shouldProbeKugou {
+            let snapshot = kugou.snapshot()
+            let previous = lastKugouSnapshot
+            lastKugouProbeAt = currentTime
+            lastKugouSnapshot = snapshot
+            if snapshot.isPlaying {
+                remainingKugouActivationProbes = 0
+            } else if previous == nil || previous?.track?.normalizedKey != snapshot.track?.normalizedKey {
+                // KuGou exposes whole-second progress and the first observation
+                // cannot distinguish pause from playback. Take two bounded
+                // follow-up samples before entering the long idle interval.
+                remainingKugouActivationProbes = Self.kugouActivationProbeCount
+            } else if remainingKugouActivationProbes > 0 {
+                remainingKugouActivationProbes -= 1
+            }
+            kugouProbe = snapshot
+        } else {
+            kugouProbe = nil
+            if !kugouRunning {
+                lastKugouProbeAt = nil
+                lastKugouSnapshot = nil
+                remainingKugouActivationProbes = 0
+            }
+        }
+        let knownKugouPlaying = kugouAudible == false ? false : (kugouProbe ?? lastKugouSnapshot)?.isPlaying == true
         let choice = AutomaticPlayerSelection.choose(
             activeBundleIdentifier: activeBundle,
             frontmostBundleIdentifier: frontmostBundle,
@@ -377,7 +426,7 @@ final class AutomaticPlayerAdapter: PlayerAdapter {
             neteaseAudible: neteaseAudible,
             kugouAudible: kugouAudible,
             neteasePlaying: neteaseProbe?.isPlaying == true,
-            kugouPlaying: kugouProbe?.isPlaying == true
+            kugouPlaying: knownKugouPlaying
         )
         switch choice {
         case .netease: selected = netease
@@ -389,7 +438,40 @@ final class AutomaticPlayerAdapter: PlayerAdapter {
         }
         if selected.kind == .netease, let neteaseProbe { return neteaseProbe }
         if selected.kind == .kugou, let kugouProbe { return kugouProbe }
+        if selected.kind == .kugou, var cached = lastKugouSnapshot {
+            if kugouAudible == false { cached.isPlaying = false }
+            return cached
+        }
+        if selected.kind == .kugou {
+            return .init(availability: .connecting("正在等待酷狗播放信息…"), player: .kugou)
+        }
         return selected.snapshot()
+    }
+
+    private func shouldProbeKugou(
+        running: Bool,
+        neteaseRunning: Bool,
+        neteaseAudible: Bool?,
+        kugouAudible: Bool?,
+        frontmostBundle: String?,
+        activeBundle: String?,
+        now: Date
+    ) -> Bool {
+        guard running else { return false }
+        // CoreAudio is the cheapest and most reliable activation signal. When
+        // another player is audibly active, do not wake an idle KuGou process.
+        if kugouAudible == true { return true }
+        if neteaseAudible == true { return false }
+        if activeBundle == PlayerBundleIdentifiers.kugou || frontmostBundle == PlayerBundleIdentifiers.kugou { return true }
+        if lastKugouSnapshot?.isPlaying == true { return true }
+
+        let needsInitialState = !neteaseRunning && lastKugouSnapshot == nil
+        guard selected?.kind == .kugou || needsInitialState else { return false }
+        guard let lastKugouProbeAt else { return true }
+        if remainingKugouActivationProbes > 0 {
+            return now.timeIntervalSince(lastKugouProbeAt) >= Self.kugouActivationProbeInterval
+        }
+        return now.timeIntervalSince(lastKugouProbeAt) >= Self.kugouIdleProbeInterval
     }
 
     func perform(_ command: PlayerCommand) throws {
