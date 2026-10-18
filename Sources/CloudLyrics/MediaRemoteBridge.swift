@@ -315,8 +315,17 @@ final class KugouPlayerAdapter: PlayerAdapter {
 
     func perform(_ command: PlayerCommand) throws {
         guard let processIdentifier = applications.processIdentifiers(for: Self.bundleIdentifier).first else { throw AXPlayerError.notRunning }
-        if bridge.perform(command, expectedBundleIdentifier: Self.bundleIdentifier) { return }
-        guard accessibility.perform(command, processIdentifier: processIdentifier) else { throw AXPlayerError.controlUnavailable }
+        try PlayerCommandRouter.perform(command, mediaRemote: {
+            bridge.perform(command, expectedBundleIdentifier: Self.bundleIdentifier)
+        }, accessibility: {
+            guard accessibility.isTrusted else {
+                accessibility.requestPermission()
+                throw AXPlayerError.permissionRequired
+            }
+            guard accessibility.perform(command, processIdentifier: processIdentifier) else {
+                throw AXPlayerError.controlUnavailable
+            }
+        })
     }
 
     func requestPermission() { accessibility.requestPermission() }

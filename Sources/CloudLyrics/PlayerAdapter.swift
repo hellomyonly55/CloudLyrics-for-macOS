@@ -36,6 +36,20 @@ struct PlayerSnapshot: Equatable {
 enum PlayerCommand: Equatable { case previous, playPause, next }
 
 @MainActor
+enum PlayerCommandRouter {
+    static func perform(
+        _ command: PlayerCommand,
+        mediaRemote: () -> Bool,
+        accessibility: () throws -> Void
+    ) throws {
+        // MediaRemote's success result only acknowledges dispatch. Track
+        // navigation must use the selected player's explicit menu command.
+        if command == .playPause, mediaRemote() { return }
+        try accessibility()
+    }
+}
+
+@MainActor
 protocol PlayerAdapter: AnyObject {
     var kind: PlayerKind? { get }
     var isRunning: Bool { get }
@@ -104,14 +118,17 @@ final class NetEasePlayerAdapter: PlayerAdapter {
         guard let processIdentifier = applications.processIdentifiers(for: Self.bundleIdentifier).first else {
             throw AXPlayerError.notRunning
         }
-        if bridge.perform(command, expectedBundleIdentifier: Self.bundleIdentifier) { return }
-        guard accessibility.isTrusted else {
-            accessibility.requestPermission()
-            throw AXPlayerError.permissionRequired
-        }
-        guard accessibility.perform(command, processIdentifier: processIdentifier) else {
-            throw AXPlayerError.controlUnavailable
-        }
+        try PlayerCommandRouter.perform(command, mediaRemote: {
+            bridge.perform(command, expectedBundleIdentifier: Self.bundleIdentifier)
+        }, accessibility: {
+            guard accessibility.isTrusted else {
+                accessibility.requestPermission()
+                throw AXPlayerError.permissionRequired
+            }
+            guard accessibility.perform(command, processIdentifier: processIdentifier) else {
+                throw AXPlayerError.controlUnavailable
+            }
+        })
     }
 }
 
