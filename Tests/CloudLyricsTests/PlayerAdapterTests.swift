@@ -3,6 +3,51 @@ import XCTest
 
 @MainActor
 final class PlayerAdapterTests: XCTestCase {
+    func testTrackNavigationBypassesMediaRemoteEvenWhenItWouldReportSuccess() throws {
+        for command in [PlayerCommand.previous, .next] {
+            var remoteCalls = 0
+            var menuCommands: [PlayerCommand] = []
+            try PlayerCommandRouter.perform(command, mediaRemote: {
+                remoteCalls += 1
+                return true
+            }, accessibility: {
+                menuCommands.append(command)
+            })
+            XCTAssertEqual(remoteCalls, 0)
+            XCTAssertEqual(menuCommands, [command])
+        }
+    }
+
+    func testPlayPauseUsesMediaRemoteAndFallsBackWhenDispatchFails() throws {
+        for accepted in [true, false] {
+            var remoteCalls = 0
+            var menuCalls = 0
+            try PlayerCommandRouter.perform(.playPause, mediaRemote: {
+                remoteCalls += 1
+                return accepted
+            }, accessibility: {
+                menuCalls += 1
+            })
+            XCTAssertEqual(remoteCalls, 1)
+            XCTAssertEqual(menuCalls, accepted ? 0 : 1)
+        }
+    }
+
+    func testNavigationReportsMenuFailureWithoutSendingRemoteCommand() {
+        for command in [PlayerCommand.previous, .next] {
+            XCTAssertThrowsError(try PlayerCommandRouter.perform(command, mediaRemote: {
+                XCTFail("Navigation must not dispatch a system playback command")
+                return true
+            }, accessibility: {
+                throw AXPlayerError.controlUnavailable
+            })) { error in
+                guard case AXPlayerError.controlUnavailable = error else {
+                    return XCTFail("Unexpected error: \(error)")
+                }
+            }
+        }
+    }
+
     func testPlayerProcessStateTracksLaunchesAndTerminations() {
         var state = PlayerProcessState()
         state.applicationLaunched(bundleIdentifier: PlayerBundleIdentifiers.kugou, processIdentifier: 42)
