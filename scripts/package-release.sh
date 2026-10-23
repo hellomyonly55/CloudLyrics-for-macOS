@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="${0:A:h:h}"
-VERSION="${1:-0.2.0}"
+VERSION="${1:-1.0.0}"
 IDENTIFIER="io.github.hellomyonly55.CloudLyrics"
 OUTPUT_DIR="$ROOT/.build/releases"
 STAGING_DIR="${TMPDIR%/}/CloudLyrics-release/$VERSION-$(date +%Y%m%d%H%M%S)-$$"
@@ -34,8 +34,8 @@ for artifact in "$ZIP" "$DMG" "$ZIP_CHECKSUM" "$DMG_CHECKSUM"; do
 done
 
 cd "$ROOT"
-ARM_SCRATCH="$ROOT/.build/release-arm64"
-INTEL_SCRATCH="$ROOT/.build/release-x86_64"
+ARM_SCRATCH="$STAGING_DIR/build-arm64"
+INTEL_SCRATCH="$STAGING_DIR/build-x86_64"
 swift build -c release --arch arm64 --scratch-path "$ARM_SCRATCH"
 swift build -c release --arch x86_64 --scratch-path "$INTEL_SCRATCH"
 ARM_BIN_DIR="$(swift build -c release --arch arm64 --scratch-path "$ARM_SCRATCH" --show-bin-path)"
@@ -47,6 +47,9 @@ COPYFILE_DISABLE=1 cp "$ROOT/Resources/Info.plist" "$CONTENTS/Info.plist"
 COPYFILE_DISABLE=1 cp "$ROOT/Resources/AppIcon.icns" "$CONTENTS/Resources/AppIcon.icns"
 chmod +x "$CONTENTS/MacOS/CloudLyrics"
 codesign --force --deep --sign - --identifier "$IDENTIFIER" "$APP"
+codesign --verify --deep --strict "$APP"
+lipo "$CONTENTS/MacOS/CloudLyrics" -verify_arch arm64
+lipo "$CONTENTS/MacOS/CloudLyrics" -verify_arch x86_64
 
 COPYFILE_DISABLE=1 ditto -c -k --keepParent --norsrc "$APP" "$ZIP"
 mkdir -p "$DMG_STAGING"

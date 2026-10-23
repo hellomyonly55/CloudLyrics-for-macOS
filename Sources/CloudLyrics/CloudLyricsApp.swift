@@ -10,6 +10,14 @@ enum CloudLyricsApp {
     private static var retainedDelegate: AppDelegate?
 
     static func main() {
+        if CommandLine.arguments.contains("--diagnose-controls") {
+            let bridge = NetEaseAccessibilityCommandBridge()
+            if let app = NSRunningApplication.runningApplications(withBundleIdentifier: PlayerBundleIdentifiers.netease).first {
+                print(bridge.diagnosticSummary(processIdentifier: app.processIdentifier))
+            } else { print("NETEASE_NOT_RUNNING") }
+            fflush(stdout)
+            Darwin.exit(EXIT_SUCCESS)
+        }
         if CommandLine.arguments.contains("--diagnose-now-playing") {
             diagnoseNowPlaying()
             fflush(stdout)
@@ -119,8 +127,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         button.title = ""
         button.image = nil
         button.toolTip = "CloudLyrics"
-        button.action = nil
-        button.target = nil
+        button.action = #selector(statusItemClicked(_:))
+        button.target = self
+        button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         statusLyricsView.onOpen = { [weak self] in self?.openSettings() }
         statusLyricsView.onSettings = { [weak self] in self?.openSettings() }
         statusLyricsView.onCommand = { [weak self] command in self?.viewModel.perform(command) }
@@ -142,6 +151,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .store(in: &statusSubscriptions)
     }
 
+    @objc private func statusItemClicked(_ sender: NSStatusBarButton) {
+        if NSApp.currentEvent?.type == .rightMouseUp {
+            openSettings()
+            return
+        }
+        guard let window = statusLyricsView.window else { return }
+        // NSStatusBarButton can deliver a synthetic event at the item's center.
+        // That turns every control into play/pause if locationInWindow is used.
+        // Read the actual cursor position while the native click action runs.
+        let point = statusLyricsView.convert(window.convertPoint(fromScreen: NSEvent.mouseLocation), from: nil)
+        statusLyricsView.activate(at: point)
+    }
+
     private func openSettings() {
         if let settingsWindow {
             if settingsWindow.isVisible {
@@ -155,7 +177,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let window = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 460, height: 500),
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 590),
             styleMask: [.titled, .closable, .utilityWindow],
             backing: .buffered,
             defer: false
@@ -226,7 +248,7 @@ private struct StatusPresentation: Equatable {
 }
 
 @MainActor
-private final class StatusLyricsView: NSView {
+final class StatusLyricsView: NSView {
     private let primaryLabel = MarqueeLabel(string: "等待歌词…")
     private let secondaryLabel = MarqueeLabel(string: " ")
     private let lyricStack = NSStackView()
@@ -235,6 +257,7 @@ private final class StatusLyricsView: NSView {
     private var controlsCenterConstraint: NSLayoutConstraint!
     private var isHoveringControls = false
     private var displayedPrimary: String?
+    private var commandControls: [(command: PlayerCommand, view: PlaybackControlView)] = []
     var onOpen: (() -> Void)?
     var onSettings: (() -> Void)?
     var onCommand: ((PlayerCommand) -> Void)?
@@ -354,31 +377,44 @@ private final class StatusLyricsView: NSView {
         lyricStack.isHidden = false
     }
 
-    override func mouseDown(with event: NSEvent) {
-        guard isHoveringControls else { onOpen?(); return }
+    // NSStatusBarButton owns mouse tracking. Pass hits through to its native
+    // action, then use the cursor position to dispatch the displayed control.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    var controlHitRegions: [(command: PlayerCommand, rect: NSRect)] {
+        commandControls.map { ($0.command, $0.view.convert($0.view.bounds, to: self)) }
     }
 
-    override func rightMouseDown(with event: NSEvent) { onSettings?() }
+    func command(at point: NSPoint) -> PlayerCommand? {
+        guard isHoveringControls else { return nil }
+        return controlHitRegions.first { $0.rect.contains(point) }?.command
+    }
 
-    private func commandButton(_ symbol: String, help: String, command: PlayerCommand) -> NSButton {
+    func activate(at point: NSPoint) {
+        if let command = command(at: point) { onCommand?(command) }
+        else { onOpen?() }
+    }
+
+    private func commandButton(_ symbol: String, help: String, command: PlayerCommand) -> NSView {
         let base = NSImage(systemSymbolName: symbol, accessibilityDescription: help) ?? NSImage()
         let configuration = NSImage.SymbolConfiguration(pointSize: 13, weight: .semibold).applying(.init(paletteColors: [.white]))
-        let image = base.withSymbolConfiguration(configuration) ?? base
-        image.isTemplate = false
-        let button = PressFeedbackButton(frame: .zero)
-        button.image = image
-        button.isBordered = false
-        button.imagePosition = .imageOnly
-        button.imageScaling = .scaleProportionallyDown
-        button.contentTintColor = .white
-        button.toolTip = help
-        button.onPress = { [weak self] in self?.onCommand?(command) }
+        let control = PlaybackControlView()
+        control.translatesAutoresizingMaskIntoConstraints = false
+        control.image = base.withSymbolConfiguration(configuration) ?? base
+        control.image?.isTemplate = false
+        control.imageScaling = .scaleProportionallyDown
+        control.toolTip = help
+        control.setAccessibilityRole(.button)
+        control.setAccessibilityLabel(help)
+        control.onPress = { [weak self] in self?.onCommand?(command) }
         NSLayoutConstraint.activate([
-            button.widthAnchor.constraint(equalToConstant: 38),
-            button.heightAnchor.constraint(equalToConstant: 26)
+            control.widthAnchor.constraint(equalToConstant: 38),
+            control.heightAnchor.constraint(equalToConstant: 20)
         ])
-        return button
+        commandControls.append((command, control))
+        return control
     }
+
 }
 
 private final class MarqueeLabel: NSView {
@@ -533,26 +569,12 @@ private final class MarqueeLabel: NSView {
     }
 }
 
-private final class PressFeedbackButton: NSButton {
+private final class PlaybackControlView: NSImageView {
     var onPress: (() -> Void)?
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        wantsLayer = true
-        target = self
-        action = #selector(pressed)
-        setButtonType(.momentaryChange)
+    override func accessibilityPerformPress() -> Bool {
+        onPress?()
+        return true
     }
-
-    required init?(coder: NSCoder) { nil }
-
-    override func highlight(_ flag: Bool) {
-        super.highlight(flag)
-        alphaValue = flag ? 0.45 : 1
-        layer?.setAffineTransform(flag ? CGAffineTransform(scaleX: 0.88, y: 0.88) : .identity)
-    }
-
-    @objc private func pressed() { onPress?() }
 }
 
 private extension NSColor {

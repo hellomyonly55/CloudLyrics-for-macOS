@@ -18,8 +18,7 @@ struct PlayerSnapshot: Equatable {
     var normalizedProgress: TimeInterval {
         guard let duration = track?.duration, duration > 0 else { return max(0, progress) }
         let positive = max(0, progress)
-        if positive <= duration { return positive }
-        return positive.truncatingRemainder(dividingBy: duration)
+        return min(positive, duration)
     }
 
     var lyricProgress: TimeInterval {
@@ -104,6 +103,9 @@ final class NetEasePlayerAdapter: PlayerAdapter {
         guard let processIdentifier = applications.processIdentifiers(for: Self.bundleIdentifier).first else {
             throw AXPlayerError.notRunning
         }
+        // The native menu targets this exact player. MediaRemote may accept a
+        // command while retaining stale ownership after playback moved engines.
+        if accessibility.isTrusted, accessibility.perform(command, processIdentifier: processIdentifier) { return }
         if bridge.perform(command, expectedBundleIdentifier: Self.bundleIdentifier) { return }
         guard accessibility.isTrusted else {
             accessibility.requestPermission()

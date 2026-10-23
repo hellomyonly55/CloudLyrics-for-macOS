@@ -72,7 +72,13 @@ struct LyricsDocument: Codable, Equatable, Sendable {
             let mid = (low + high) / 2
             if lines[mid].time <= value { low = mid + 1 } else { high = mid }
         }
-        return max(0, low - 1)
+        return low == 0 ? nil : low - 1
+    }
+
+    func nextLineDelay(after progress: TimeInterval) -> TimeInterval? {
+        let index = lineIndex(at: progress).map { $0 + 1 } ?? 0
+        guard lines.indices.contains(index) else { return nil }
+        return lines[index].time + offset - progress
     }
 }
 
@@ -116,6 +122,41 @@ enum LyricsAlignment: String, CaseIterable, Codable, Identifiable {
     var label: String { ["leading": "左对齐", "center": "居中", "trailing": "右对齐"][rawValue]! }
     var textAlignment: TextAlignment { self == .leading ? .leading : self == .trailing ? .trailing : .center }
     var frameAlignment: Alignment { self == .leading ? .leading : self == .trailing ? .trailing : .center }
+}
+
+enum RefreshMode: String, Codable, CaseIterable, Identifiable {
+    case responsive, balanced, energySaving
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .responsive: "快速响应"
+        case .balanced: "自动平衡（推荐）"
+        case .energySaving: "优先省电"
+        }
+    }
+    func pollingInterval(lowPower: Bool) -> TimeInterval {
+        switch self {
+        case .responsive: 0.2
+        case .balanced: lowPower ? 1.0 : 0.5
+        case .energySaving: 1.0
+        }
+    }
+}
+
+struct SynchronizationSettings: Codable, Equatable {
+    var refreshMode: RefreshMode = .balanced
+    // Positive values show lyrics earlier. Keep the previous default lead.
+    var neteaseLead: TimeInterval = 0.5
+    var kugouLead: TimeInterval = 0.5
+    static let defaults = SynchronizationSettings()
+
+    func lead(for player: PlayerKind?) -> TimeInterval {
+        switch player {
+        case .netease: neteaseLead
+        case .kugou: kugouLead
+        case nil: 0
+        }
+    }
 }
 
 struct AppearanceSettings: Codable, Equatable {

@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Foundation
 
 @MainActor
@@ -9,7 +10,14 @@ final class AppViewModel: ObservableObject {
     @Published private(set) var message = "正在等待播放器…"
     @Published private(set) var isLoading = false
     @Published var settingsPresented = false
+    @Published private(set) var controlError: String?
+    private var controlErrorTask: Task<Void, Never>?
 
+    private let settings: SettingsStore
+    private var settingsSubscription: AnyCancellable?
+    private var lyricTimer: Timer?
+    private var sampledAt = ProcessInfo.processInfo.systemUptime
+    private let automaticallyRefresh: Bool
     private let player: PlayerAdapter
     private let providers: [LyricsProvider]
     private let cache = LyricsCache()
@@ -18,16 +26,27 @@ final class AppViewModel: ObservableObject {
     private var currentKey: String?
     private var permissionRequested = false
 
-    init(player: PlayerAdapter? = nil, providers: [LyricsProvider] = [KugouLocalLyricsProvider(), NetEaseLyricsProvider(), LRCLIBLyricsProvider()]) {
+    init(player: PlayerAdapter? = nil, providers: [LyricsProvider] = [KugouLocalLyricsProvider(), NetEaseLyricsProvider(), LRCLIBLyricsProvider()], settings: SettingsStore? = nil, automaticallyRefresh: Bool = true) {
+        self.settings = settings ?? SettingsStoreReference.shared
+        self.automaticallyRefresh = automaticallyRefresh
         self.player = player ?? AutomaticPlayerAdapter(); self.providers = providers
+        settingsSubscription = self.settings.objectWillChange.sink { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.objectWillChange.send()
+                self.scheduleNextRefresh()
+                self.scheduleLyricBoundary()
+            }
+        }
         refresh()
     }
 
-    deinit { timer?.invalidate(); loadTask?.cancel() }
+    deinit { timer?.invalidate(); lyricTimer?.invalidate(); loadTask?.cancel(); controlErrorTask?.cancel() }
 
     func refresh(force: Bool = false) {
-        defer { scheduleNextRefresh() }
+        defer { scheduleNextRefresh(); scheduleLyricBoundary() }
         let latestSnapshot = player.snapshot()
+        sampledAt = ProcessInfo.processInfo.systemUptime
         if latestSnapshot != snapshot { snapshot = latestSnapshot }
         switch snapshot.availability {
         case .permissionRequired:
@@ -56,6 +75,8 @@ final class AppViewModel: ObservableObject {
             if !force, let cached = await cache.document(for: track) {
                 guard !Task.isCancelled, currentKey == key else { return }
                 document = cached
+                setMessage("")
+                scheduleLyricBoundary()
                 if isLoading { isLoading = false }
                 return
             }
@@ -79,7 +100,9 @@ final class AppViewModel: ObservableObject {
             guard !Task.isCancelled, currentKey == key else { return }
             if let result {
                 await cache.store(result)
+                guard !Task.isCancelled, currentKey == key else { return }
                 document = result
+                scheduleLyricBoundary()
                 setMessage("")
             } else {
                 setMessage("暂无歌词")
@@ -90,8 +113,19 @@ final class AppViewModel: ObservableObject {
 
     func requestPermission() { player.requestPermission() }
     func perform(_ command: PlayerCommand) {
-        do { try player.perform(command); DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in self?.refresh() } }
-        catch { setMessage(error.localizedDescription) }
+        NSLog("CloudLyrics playback command: %@", String(describing: command))
+        controlErrorTask?.cancel()
+        controlError = nil
+        do {
+            try player.perform(command)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in self?.refresh() }
+        } catch {
+            controlError = error.localizedDescription
+            controlErrorTask = Task { [weak self] in
+                do { try await Task.sleep(nanoseconds: 5_000_000_000) } catch { return }
+                self?.controlError = nil
+            }
+        }
     }
 
     private func setMessage(_ value: String) {
@@ -100,16 +134,18 @@ final class AppViewModel: ObservableObject {
 
     private func scheduleNextRefresh() {
         timer?.invalidate()
+        guard automaticallyRefresh else { return }
         let interval: TimeInterval
         if snapshot.isPlaying {
-            // Five samples per second keeps time-synchronised lyrics responsive
-            // without continuously polling player, process and audio state at 10 Hz.
-            interval = 0.2
+            interval = settings.synchronization.refreshMode.pollingInterval(
+                lowPower: ProcessInfo.processInfo.isLowPowerModeEnabled
+            )
         } else {
             switch snapshot.availability {
             case .connecting: interval = 0.5
             case .ready: interval = 0.75
-            case .permissionRequired, .notRunning, .incompatible: interval = 1.0
+            case .permissionRequired, .incompatible: interval = 2.0
+            case .notRunning: interval = 3.0
             }
         }
         let next = Timer(timeInterval: interval, repeats: false) { [weak self] _ in
@@ -120,9 +156,39 @@ final class AppViewModel: ObservableObject {
         timer = next
     }
 
+    // Interpolate in memory between player reads. A one-shot timer wakes only
+    // when the next lyric is due, rather than reading AX/files more often.
+    private var displayProgress: TimeInterval {
+        var progress = snapshot.normalizedProgress
+        if snapshot.isPlaying {
+            progress += max(0, ProcessInfo.processInfo.systemUptime - sampledAt)
+        }
+        if let duration = snapshot.track?.duration, duration > 0 { progress = min(progress, duration) }
+        return progress + settings.synchronization.lead(for: snapshot.player)
+    }
+
+    private func scheduleLyricBoundary() {
+        lyricTimer?.invalidate()
+        guard automaticallyRefresh, snapshot.isPlaying, let document else { return }
+        if let duration = snapshot.track?.duration, duration > 0, snapshot.normalizedProgress >= duration { return }
+        guard let delay = document.nextLineDelay(after: displayProgress) else { return }
+        let next = Timer(timeInterval: max(0.001, delay), repeats: false) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.objectWillChange.send()
+                self.scheduleLyricBoundary()
+            }
+        }
+        next.tolerance = 0.01
+        RunLoop.main.add(next, forMode: .common)
+        lyricTimer = next
+    }
+
     var currentLines: (String, String?) {
-        guard let document, let index = document.lineIndex(at: snapshot.lyricProgress) else { return (isLoading ? "正在加载歌词…" : message, nil) }
-        let presentation = LyricPresentation.make(document: document, index: index, mode: SettingsStoreReference.shared.appearance.mode)
+        if let controlError { return (controlError, "右键歌词区域可打开设置") }
+        guard let document else { return (isLoading ? "正在加载歌词…" : message, nil) }
+        guard let index = document.lineIndex(at: displayProgress) else { return ("前奏…", nil) }
+        let presentation = LyricPresentation.make(document: document, index: index, mode: settings.appearance.mode)
         return (presentation.primary, presentation.secondary)
     }
 }

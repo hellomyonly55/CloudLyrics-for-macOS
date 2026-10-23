@@ -87,10 +87,11 @@ struct NetEaseProgressEstimator {
                 // from interpolation to the older on-disk value.
                 progress = max(progress, incomingProgress)
             } else {
-                // Native progress is written at whole-second boundaries. It can
-                // arrive after interpolation has already crossed a lyric time,
-                // so a normal forward sample must never pull the display back.
-                progress = max(progress, incomingProgress)
+                // Include the time since the last observation before applying
+                // a delayed native tick, so an in-between lyric boundary does
+                // not rewind when the next player sample arrives.
+                let advanced = wasPlaying ? max(0, observedAt.map { now.timeIntervalSince($0) } ?? 0) : 0
+                progress = max(progress + advanced, incomingProgress)
             }
             observedAt = now
             wasPlaying = isPlaying
@@ -278,6 +279,18 @@ struct NetEaseLastPlayingStateCache {
     mutating func reset() { state = nil }
 }
 
+enum NetEaseLocalReadFailure {
+    static func message(for error: Error) -> String? {
+        let error = error as NSError
+        if error.domain == NSCocoaErrorDomain, error.code == NSFileReadNoSuchFileError { return nil }
+        if (error.domain == NSCocoaErrorDomain && error.code == NSFileReadNoPermissionError) ||
+            (error.domain == NSPOSIXErrorDomain && [1, 13].contains(error.code)) {
+            return "无法读取网易云播放数据：请在系统设置 → 隐私与安全性 → 完全磁盘访问权限中允许 CloudLyrics，然后退出并重新打开。辅助功能授权不包含此权限。"
+        }
+        return "网易云播放数据读取失败：\(error.localizedDescription)"
+    }
+}
+
 private final class NetEaseLastPlayingReader: @unchecked Sendable {
     private struct Signature: Equatable {
         var size: Int
@@ -287,6 +300,7 @@ private final class NetEaseLastPlayingReader: @unchecked Sendable {
     private let directoryURL: URL
     private var signatures: [String: Signature] = [:]
     private var cache = NetEaseLastPlayingStateCache()
+    private(set) var failure: String?
 
     init(containerURL: URL) {
         directoryURL = containerURL.appendingPathComponent(
@@ -297,11 +311,18 @@ private final class NetEaseLastPlayingReader: @unchecked Sendable {
 
     func read() -> NetEaseLastPlayingState? {
         let keys: Set<URLResourceKey> = [.contentModificationDateKey, .fileSizeKey, .isRegularFileKey]
-        guard let urls = try? FileManager.default.contentsOfDirectory(
-            at: directoryURL,
-            includingPropertiesForKeys: Array(keys),
-            options: [.skipsHiddenFiles]
-        ) else { return cache.state }
+        failure = nil
+        let urls: [URL]
+        do {
+            urls = try FileManager.default.contentsOfDirectory(
+                at: directoryURL,
+                includingPropertiesForKeys: Array(keys),
+                options: [.skipsHiddenFiles]
+            )
+        } catch {
+            failure = NetEaseLocalReadFailure.message(for: error)
+            return nil
+        }
 
         var changedLogs: [(URL, Signature)] = []
         var changedTables: [(URL, Signature)] = []
@@ -314,7 +335,6 @@ private final class NetEaseLastPlayingReader: @unchecked Sendable {
                   let modifiedAt = values.contentModificationDate else { continue }
             let signature = Signature(size: size, modifiedAt: modifiedAt)
             guard signatures[url.path] != signature else { continue }
-            signatures[url.path] = signature
             if extensionName == "log" {
                 changedLogs.append((url, signature))
             } else {
@@ -325,6 +345,7 @@ private final class NetEaseLastPlayingReader: @unchecked Sendable {
         changedLogs.sort { newer($0, than: $1) }
         for (url, signature) in changedLogs {
             guard let data = tail(of: url, size: signature.size) else { continue }
+            signatures[url.path] = signature
             if let state = NetEaseLastPlayingDecoder.states(in: data).last?.state {
                 return cache.observeLog(state)
             }
@@ -337,8 +358,11 @@ private final class NetEaseLastPlayingReader: @unchecked Sendable {
         guard cache.state == nil else { return cache.state }
 
         changedTables.sort { newer($0, than: $1) }
-        for (url, _) in changedTables {
-            guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { continue }
+        for (url, signature) in changedTables {
+            let data: Data
+            do { data = try Data(contentsOf: url, options: .mappedIfSafe) }
+            catch { failure = NetEaseLocalReadFailure.message(for: error); continue }
+            signatures[url.path] = signature
             if let state = NetEaseLastPlayingDecoder.states(in: data).first?.state {
                 return cache.bootstrapFromTable(state)
             }
@@ -352,7 +376,9 @@ private final class NetEaseLastPlayingReader: @unchecked Sendable {
     }
 
     private func tail(of url: URL, size: Int) -> Data? {
-        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        let handle: FileHandle
+        do { handle = try FileHandle(forReadingFrom: url) }
+        catch { failure = NetEaseLocalReadFailure.message(for: error); return nil }
         defer { try? handle.close() }
         let maximumBytes = 128 * 1_024
         let start = max(0, size - maximumBytes)
@@ -360,6 +386,7 @@ private final class NetEaseLastPlayingReader: @unchecked Sendable {
             try handle.seek(toOffset: UInt64(start))
             return try handle.readToEnd()
         } catch {
+            failure = NetEaseLocalReadFailure.message(for: error)
             return nil
         }
     }
@@ -394,10 +421,11 @@ private final class NetEaseLocalStateScanner: @unchecked Sendable {
     private var cachedTracks: [String: TrackIdentity] = [:]
 
     func request(
-        completion: @escaping @Sendable (NetEaseLocalPlayback?) -> Void
+        completion: @escaping @Sendable (NetEaseLocalPlayback?, String?) -> Void
     ) {
         queue.async { [self] in
-            completion(scan())
+            let playback = scan()
+            completion(playback, stateReader.failure)
         }
     }
 
@@ -455,6 +483,7 @@ final class NetEaseLocalPlaybackBridge {
     private var activityResolver = NetEasePlaybackActivityResolver()
     private var processIdentifier: pid_t?
     private var latestPlayback: NetEaseLocalPlayback?
+    private var readFailure: String?
     private var scanPending = false
     private var nextScanAt = Date.distantPast
 
@@ -466,12 +495,16 @@ final class NetEaseLocalPlaybackBridge {
         if self.processIdentifier != processIdentifier {
             self.processIdentifier = processIdentifier
             latestPlayback = nil
+            readFailure = nil
             progressEstimator = .init()
             activityResolver = .init()
             nextScanAt = .distantPast
             scanner.reset()
         }
         requestUpdate(processIdentifier: processIdentifier, now: now)
+        if let readFailure {
+            return .init(availability: .incompatible(readFailure), player: .netease)
+        }
         guard let playback = latestPlayback, let songID = playback.track.sourceID else {
             return .init(availability: .connecting("正在等待网易云播放信息…"), player: .netease)
         }
@@ -501,6 +534,7 @@ final class NetEaseLocalPlaybackBridge {
         guard processIdentifier != nil || latestPlayback != nil || scanPending else { return }
         processIdentifier = nil
         latestPlayback = nil
+        readFailure = nil
         progressEstimator = .init()
         activityResolver = .init()
         scanPending = false
@@ -512,11 +546,12 @@ final class NetEaseLocalPlaybackBridge {
         guard !scanPending, now >= nextScanAt else { return }
         scanPending = true
         nextScanAt = now.addingTimeInterval(Self.scanInterval)
-        scanner.request { [weak self] playback in
+        scanner.request { [weak self] playback, failure in
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.scanPending = false
                 guard self.processIdentifier == processIdentifier else { return }
+                self.readFailure = failure
                 // Keep the last observation through a brief LevelDB rotation
                 // while NetEase switches or repeats a track.
                 if let playback { self.latestPlayback = playback }
@@ -536,16 +571,32 @@ final class NetEaseAccessibilityCommandBridge {
 
     func perform(_ command: PlayerCommand, processIdentifier: pid_t) -> Bool {
         guard isTrusted else { requestPermission(); return false }
-        let titles: Set<String>
-        switch command {
-        case .previous: titles = ["上一个"]
-        case .playPause: titles = ["播放", "暂停"]
-        case .next: titles = ["下一个"]
-        }
+        let titles = Self.menuTitles(for: command)
         let application = AXUIElementCreateApplication(processIdentifier)
         guard let menuBar = elementAttribute(application, kAXMenuBarAttribute),
               let item = findMenuItem(titles: titles, in: menuBar, visited: 0) else { return false }
         return AXUIElementPerformAction(item, kAXPressAction as CFString) == .success
+    }
+
+    static func menuTitles(for command: PlayerCommand) -> Set<String> {
+        switch command {
+        case .previous: ["上一个", "上一首", "上一曲", "Previous", "Previous Track"]
+        case .playPause: ["播放", "暂停", "播放/暂停", "Play", "Pause", "Play/Pause"]
+        case .next: ["下一个", "下一首", "下一曲", "Next", "Next Track"]
+        }
+    }
+
+    func diagnosticSummary(processIdentifier: pid_t) -> String {
+        guard isTrusted else { return "AX_TRUSTED=false" }
+        let application = AXUIElementCreateApplication(processIdentifier)
+        guard let menuBar = elementAttribute(application, kAXMenuBarAttribute) else { return "AX_TRUSTED=true MENU_UNAVAILABLE" }
+        return (["AX_TRUSTED=true"] + [PlayerCommand.previous, .playPause, .next].map { command in
+            guard let item = findMenuItem(titles: Self.menuTitles(for: command), in: menuBar, visited: 0) else {
+                return "\(command)=missing"
+            }
+            let enabled = attribute(item, kAXEnabledAttribute) as? Bool ?? false
+            return "\(command)=\(attribute(item, kAXTitleAttribute) as? String ?? "unknown"),enabled=\(enabled)"
+        }).joined(separator: "\n")
     }
 
     private func findMenuItem(titles: Set<String>, in element: AXUIElement, visited: Int) -> AXUIElement? {

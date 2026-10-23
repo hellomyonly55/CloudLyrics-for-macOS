@@ -4,6 +4,39 @@ All notable changes to CloudLyrics are documented in this file.
 
 ## Unreleased
 
+## [1.0.0] - 2026-10-24
+
+### Added
+
+- Separate Appearance, Lyric Synchronization, and General settings tabs, with a live appearance preview and context-sensitive secondary-line options.
+- Independent NetEase and KuGou lyric timing adjustments in 0.1-second steps, from -5 to +5 seconds.
+- Responsive, Balanced, and Energy Saving refresh modes; Balanced mode adapts to macOS Low Power Mode.
+- Actionable feedback when NetEase local playback data is blocked by macOS file-access protection, plus permission settings shortcuts.
+
+### Fixed
+
+- Fixed menu-bar previous/next clicks being interpreted as play/pause by routing native status-item actions using the actual cursor position and each control's displayed bounds.
+- Prefer NetEase's own Accessibility menu for playback commands, support Chinese and English menu labels, and surface control failures even while lyrics are loaded.
+- Clamp playback at track duration instead of wrapping lyrics to an earlier position; wait for the first lyric timestamp during instrumental intros.
+- Preserve elapsed time when delayed NetEase progress writes arrive, avoiding brief lyric regressions.
+- Keep lyric presentation tied to the supplied settings store and report launch-at-login failures.
+
+### Changed
+
+- Removed the hover toolbar's settings gear. Right-click lyrics or click outside the playback controls to open settings.
+- Appearance and synchronization settings can be reset independently, preserving existing appearance preferences during upgrades.
+
+### Performance
+
+- Trigger lyric changes with an in-memory clock and one-shot boundary timers between player polls.
+- Balanced playback polling is 0.5 seconds, or 1 second in Low Power Mode; idle polling slows when no player is running. Battery savings have not been benchmarked.
+
+### Release validation
+
+- 61 automated tests pass, including lyric calibration, preference migration, lyric-boundary scheduling without player polling, and status-control hit routing.
+- Manually reproduced the native menu-bar click issue and verified that left/right cursor clicks dispatch previous/next commands after the fix.
+- Universal DMG and ZIP packages include Apple Silicon and Intel binaries. The app remains ad-hoc signed and is not notarized; updates may require renewed Accessibility approval.
+
 ## [0.2.2] - 2026-08-01
 
 ### Fixed

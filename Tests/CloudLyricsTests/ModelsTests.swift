@@ -81,7 +81,7 @@ final class ModelsTests: XCTestCase {
         let document = LyricsDocument(track: track, lines: [
             .init(time: 1, text: "one"), .init(time: 3, text: "three"), .init(time: 5, text: "five")
         ], source: "test")
-        XCTAssertEqual(document.lineIndex(at: 0), 0)
+        XCTAssertNil(document.lineIndex(at: 0))
         XCTAssertEqual(document.lineIndex(at: 3), 1)
         XCTAssertEqual(document.lineIndex(at: 100), 2)
     }
@@ -93,10 +93,10 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(document.lineIndex(at: 2.5), 1)
     }
 
-    func testPlayerProgressWrapsWithinDuration() {
+    func testPlayerProgressClampsAtTrackEnd() {
         let track = TrackIdentity(title: "t", artist: "a", duration: 203)
         let snapshot = PlayerSnapshot(availability: .ready, track: track, progress: 973, isPlaying: true)
-        XCTAssertEqual(snapshot.normalizedProgress, 161, accuracy: 0.001)
+        XCTAssertEqual(snapshot.normalizedProgress, 203, accuracy: 0.001)
     }
 
     func testPlayerSpecificLyricLeadCompensatesDisplayLatency() {
@@ -286,7 +286,7 @@ final class ModelsTests: XCTestCase {
         )
 
         XCTAssertEqual(interpolated, 10.2, accuracy: 0.001)
-        XCTAssertEqual(delayedNativeSample, interpolated, accuracy: 0.001)
+        XCTAssertEqual(delayedNativeSample, 10.21, accuracy: 0.001)
         XCTAssertEqual(document.lineIndex(at: interpolated), 1)
         XCTAssertEqual(document.lineIndex(at: delayedNativeSample), 1)
 
@@ -405,6 +405,44 @@ final class ModelsTests: XCTestCase {
         XCTAssertTrue(resolver.resolve(songID: "1", exactProgress: 11, audible: nil, now: start.addingTimeInterval(20.1)))
         XCTAssertFalse(resolver.resolve(songID: "1", exactProgress: 11, audible: nil, now: start.addingTimeInterval(26.7)))
         XCTAssertFalse(resolver.resolve(songID: "1", exactProgress: 11, audible: false, now: start.addingTimeInterval(26.8)))
+    }
+
+    func testDelayedNativeTickIncludesTimeSincePreviousObservation() {
+        var estimator = NetEaseProgressEstimator()
+        let start = Date(timeIntervalSince1970: 10_000)
+        _ = estimator.update(songID: "1", duration: 100, exactProgress: 10, isPlaying: true, now: start)
+        _ = estimator.update(songID: "1", duration: 100, exactProgress: 10, isPlaying: true, now: start.addingTimeInterval(1.4))
+        let next = estimator.update(songID: "1", duration: 100, exactProgress: 11, isPlaying: true, now: start.addingTimeInterval(1.6))
+        XCTAssertEqual(next, 11.6, accuracy: 0.001)
+    }
+
+    func testNextLyricDeadlineIncludesDocumentOffsetAndPrelude() {
+        let document = LyricsDocument(track: .init(title: "t", artist: "a"), lines: [
+            .init(time: 3, text: "one"), .init(time: 7, text: "two")
+        ], source: "test", offset: 0.5)
+        XCTAssertNil(document.lineIndex(at: 3.49))
+        XCTAssertEqual(document.nextLineDelay(after: 1), 2.5)
+        XCTAssertEqual(document.nextLineDelay(after: 3.5), 4)
+        XCTAssertNil(document.nextLineDelay(after: 7.5))
+    }
+
+    func testRefreshModesAndLowPowerPolicy() {
+        XCTAssertEqual(RefreshMode.balanced.pollingInterval(lowPower: false), 0.5)
+        XCTAssertEqual(RefreshMode.balanced.pollingInterval(lowPower: true), 1)
+        XCTAssertEqual(RefreshMode.responsive.pollingInterval(lowPower: true), 0.2)
+        XCTAssertEqual(RefreshMode.energySaving.pollingInterval(lowPower: false), 1)
+    }
+
+    func testNetEasePermissionDenialIsActionableInsteadOfWaiting() {
+        for error in [NSError(domain: NSCocoaErrorDomain, code: NSFileReadNoPermissionError),
+                      NSError(domain: NSPOSIXErrorDomain, code: 1),
+                      NSError(domain: NSPOSIXErrorDomain, code: 13)] {
+            let message = NetEaseLocalReadFailure.message(for: error)
+            XCTAssertTrue(message?.contains("完全磁盘访问权限") == true)
+            XCTAssertTrue(message?.contains("辅助功能授权不包含此权限") == true)
+        }
+        XCTAssertNil(NetEaseLocalReadFailure.message(for: NSError(domain: NSCocoaErrorDomain, code: NSFileReadNoSuchFileError)))
+        XCTAssertTrue(NetEaseLocalReadFailure.message(for: NSError(domain: NSCocoaErrorDomain, code: NSFileReadCorruptFileError))?.contains("读取失败") == true)
     }
 
     private func lyrics(_ lines: [TimedLyricLine]) -> LyricsDocument {
