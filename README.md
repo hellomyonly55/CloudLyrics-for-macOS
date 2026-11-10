@@ -9,7 +9,7 @@ CloudLyrics 是一款支持 macOS 网易云音乐与酷狗音乐的菜单栏双�
 > [!WARNING]
 > 这是实验性、非官方项目，与网易云音乐、网易公司、酷狗音乐、腾讯音乐及 LRCLIB 均无隶属、认可或合作关系。播放器同步依赖播放器的本地数据格式、macOS 未公开的 MediaRemote 接口及辅助功能界面，播放器或系统更新后可能失效。
 
-当前发行版：[CloudLyrics v1.0.0](https://github.com/hellomyonly55/CloudLyrics-for-macOS/releases/tag/v1.0.0)。
+当前发行版：[CloudLyrics v1.0.1](https://github.com/hellomyonly55/CloudLyrics-for-macOS/releases/tag/v1.0.1)。
 
 ### 功能
 
@@ -97,7 +97,7 @@ CloudLyrics 不会自动启动播放器；请先打开网易云音乐或酷狗�
 
 ```bash
 swift test
-./scripts/package-release.sh 1.0.0
+./scripts/package-release.sh 1.0.1
 ```
 
 发布脚本会在 `.build/releases/` 中生成 Universal DMG、ZIP 及各自的 SHA-256 文件。
@@ -118,7 +118,7 @@ CloudLyrics is an experimental macOS menu-bar lyrics app for NetEase Cloud Music
 > [!WARNING]
 > This is an unofficial project and is not affiliated with, endorsed by, or sponsored by NetEase Cloud Music, NetEase, KuGou Music, Tencent Music, or LRCLIB. Synchronization relies on player-local data formats, an undocumented macOS MediaRemote interface, and accessibility hierarchies, and may break after player or system updates.
 
-Current release: [CloudLyrics v1.0.0](https://github.com/hellomyonly55/CloudLyrics-for-macOS/releases/tag/v1.0.0).
+Current release: [CloudLyrics v1.0.1](https://github.com/hellomyonly55/CloudLyrics-for-macOS/releases/tag/v1.0.1).
 
 ### Features
 
@@ -202,7 +202,7 @@ See [SECURITY.md](SECURITY.md) for vulnerability reporting.
 
 ```bash
 swift test
-./scripts/package-release.sh 1.0.0
+./scripts/package-release.sh 1.0.1
 ```
 
 The release script writes the Universal DMG, ZIP, and their SHA-256 files under `.build/releases/`.

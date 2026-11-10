@@ -4,6 +4,8 @@ All notable changes to CloudLyrics are documented in this file.
 
 ## Unreleased
 
+## [1.0.1] - 2026-11-10
+
 ### Fixed
 
 - Size the menu-bar item to visible lyric text instead of always reserving the configured maximum; new installations default to a 240 pt maximum.

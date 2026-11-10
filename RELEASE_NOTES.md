@@ -1,23 +1,21 @@
-# CloudLyrics v0.2.2
+# CloudLyrics v1.0.1
 
-CloudLyrics v0.2.2 adds reliable no-argument synchronization for NetEase Cloud Music 3.1.8 and fixes lyric lines briefly jumping backward during normal playback.
+本次更新修复菜单栏占用、播放控制和播放器状态识别，并增加歌词失败后的自动重试。
 
-## Highlights
+## 修复与改进
 
-- NetEase 3.1.8 works when launched normally, without debugging arguments or an automatic restart
-- Read-only decoding of NetEase's local `lastPlaying` state for track identity, duration, and native progress
-- Monotonic interpolation that rejects stale LevelDB records and delayed writes across lyric boundaries
-- CoreAudio-aware pause handling that freezes progress instead of rewinding to an older on-disk value
-- Original menu-bar push/fade lyric animation retained from v0.2.1
-- Removed CEF WebSocket polling, webpack scans, renderer injection, and the local debugging endpoint
-- Universal app for Apple Silicon and Intel Macs
+- 菜单栏按当前可见歌词长度收缩，最大宽度设置作为上限；新安装默认最大 240 pt，已有设置保留。
+- 三个播放按钮独立处理鼠标点击，按下和抬起目标变化时取消操作，避免误触其他按钮。
+- 上一首、下一首只调用目标播放器的辅助功能菜单，菜单不可用或缺少权限时显示具体错误，不回退到全局切歌命令。
+- 每次读取当前运行应用，避免遗漏启动或退出通知后持续误报播放器未运行。
+- 歌词加载失败后按 5、15、45、60 秒退避重试，之后每 60 秒重试；手动刷新可立即重试。
 
-## Compatibility and security notes
+## 验证与兼容性
 
-- Requires macOS 14 or later and is tested with NetEase Cloud Music 3.1.8 and KuGou Music 3.3.2.
-- Playback synchronization relies on player-local data formats, Accessibility, CoreAudio, and MediaRemote, and may require updates after player or macOS changes.
-- NetEase Cloud Music requires no debugging arguments and is never restarted by CloudLyrics; synchronization prefers its read-only local `lastPlaying` state and uses System Now Playing as a compatibility fallback.
-- KuGou lyrics are read from its local lyric cache when available; otherwise track metadata may be sent to NetEase endpoints or LRCLIB.
-- This build is ad-hoc signed and not notarized by Apple. On first launch, Control-click the app and choose Open, or approve it in System Settings → Privacy & Security. Do not disable Gatekeeper globally.
+- 71 项自动测试通过，GitHub CI 的测试、脚本检查及 Apple Silicon / Intel 构建验证通过。
+- 支持 macOS 14 及以上，发布 ZIP、DMG 均包含 Apple Silicon 和 Intel 二进制。
+- 原项目已验证网易云音乐 3.1.8、酷狗音乐 3.3.2。本机网易云 3.1.12 可识别进程及播放控制菜单，但本地播放数据访问被系统权限拒绝，尚未完成该版本的真实歌曲同步验证。
+- 网易云本地数据访问受限时，请在系统设置 → 隐私与安全性 → 完全磁盘访问权限中启用 CloudLyrics，然后退出并重新打开；播放控制另需辅助功能权限。更新后可能需要重新启用旧授权。
+- 应用使用 ad-hoc 签名，未通过 Apple 公证。播放器本地格式与未公开接口仍可能随客户端或系统升级变化。
 
-This is an unofficial project and is not affiliated with NetEase, KuGou, or LRCLIB.
+这是非官方项目，与网易云音乐、酷狗音乐及 LRCLIB 无隶属关系。
