@@ -57,6 +57,65 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertNotNil(model.document)
     }
 
+    func testFailedLookupRetriesSameTrackAfterBackoffAndRecovers() async throws {
+        var time = Date(timeIntervalSince1970: 1_000)
+        let provider = RecoveringLyricsProvider(failures: 1)
+        let player = TestPlayer(progress: 0)
+        let model = AppViewModel(player: player, providers: [provider], automaticallyRefresh: false, now: { time })
+        try await waitForLookup(model)
+        XCTAssertNil(model.document)
+        XCTAssertEqual(model.currentLines.0, "暂无歌词")
+        for _ in 0..<5 { model.refresh() }
+        var calls = await provider.calls
+        XCTAssertEqual(calls, 1)
+        time.addTimeInterval(4.9)
+        model.refresh()
+        XCTAssertFalse(model.isLoading)
+        time.addTimeInterval(0.1)
+        model.refresh()
+        try await waitForLookup(model)
+        XCTAssertEqual(model.currentLines.0, "recovered")
+        calls = await provider.calls
+        XCTAssertEqual(calls, 2)
+        time.addTimeInterval(60)
+        model.refresh()
+        calls = await provider.calls
+        XCTAssertEqual(calls, 2)
+    }
+
+    func testLookupBackoffGrowsAndManualRefreshBypassesIt() async throws {
+        var time = Date(timeIntervalSince1970: 2_000)
+        let provider = RecoveringLyricsProvider(failures: 10)
+        let model = AppViewModel(player: TestPlayer(progress: 0), providers: [provider],
+                                 automaticallyRefresh: false, now: { time })
+        try await waitForLookup(model)
+        time.addTimeInterval(5)
+        model.refresh()
+        try await waitForLookup(model)
+        var calls = await provider.calls
+        XCTAssertEqual(calls, 2)
+        time.addTimeInterval(14)
+        model.refresh()
+        XCTAssertFalse(model.isLoading)
+        time.addTimeInterval(1)
+        model.refresh()
+        try await waitForLookup(model)
+        calls = await provider.calls
+        XCTAssertEqual(calls, 3)
+        model.refresh(force: true)
+        try await waitForLookup(model)
+        calls = await provider.calls
+        XCTAssertEqual(calls, 4)
+    }
+
+    private func waitForLookup(_ model: AppViewModel) async throws {
+        for _ in 0..<100 {
+            if !model.isLoading { return }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTFail("Lyrics lookup did not finish")
+    }
+
     private func waitForLyrics(_ model: AppViewModel) async throws {
         for _ in 0..<100 {
             if model.document != nil { return }
@@ -90,5 +149,17 @@ private struct TestLyricsProvider: LyricsProvider {
     func lyrics(for track: TrackIdentity) async throws -> LyricsDocument {
         .init(track: track, lines: [.init(time: 0, text: "first", translation: "translation"),
                                     .init(time: 5, text: "second")], source: name)
+    }
+}
+
+private actor RecoveringLyricsProvider: LyricsProvider {
+    nonisolated let name = "Recovering test provider"
+    private(set) var calls = 0
+    private let failures: Int
+    init(failures: Int) { self.failures = failures }
+    func lyrics(for track: TrackIdentity) async throws -> LyricsDocument {
+        calls += 1
+        if calls <= failures { throw URLError(.notConnectedToInternet) }
+        return .init(track: track, lines: [.init(time: 0, text: "recovered")], source: name)
     }
 }

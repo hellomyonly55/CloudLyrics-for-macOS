@@ -156,12 +156,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             openSettings()
             return
         }
-        guard let window = statusLyricsView.window else { return }
-        // NSStatusBarButton can deliver a synthetic event at the item's center.
-        // That turns every control into play/pause if locationInWindow is used.
-        // Read the actual cursor position while the native click action runs.
-        let point = statusLyricsView.convert(window.convertPoint(fromScreen: NSEvent.mouseLocation), from: nil)
-        statusLyricsView.activate(at: point)
+        openSettings()
     }
 
     private func openSettings() {
@@ -236,7 +231,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             horizontalOffset: appearance.horizontalOffset,
             showsSecondary: presentation.showsSecondary
         )
-        item.length = min(max(appearance.width, 200), 700)
+        item.length = StatusLyricsView.preferredWidth(
+            primary: primary, secondary: presentation.showsSecondary ? secondary : nil,
+            primarySize: appearance.primarySize, secondarySize: appearance.secondarySize,
+            maximumWidth: appearance.width
+        )
     }
 }
 
@@ -252,11 +251,13 @@ final class StatusLyricsView: NSView {
     private let primaryLabel = MarqueeLabel(string: "等待歌词…")
     private let secondaryLabel = MarqueeLabel(string: " ")
     private let lyricStack = NSStackView()
-    private let controlsStack = NSStackView()
+    private let controlsStack = NSView()
     private var centerConstraint: NSLayoutConstraint!
-    private var controlsCenterConstraint: NSLayoutConstraint!
+    private var controlsOffset: CGFloat = 0
     private var isHoveringControls = false
     private var displayedPrimary: String?
+    private var pressedCommand: PlayerCommand?
+    private var pressStarted = false
     private var commandControls: [(command: PlayerCommand, view: PlaybackControlView)] = []
     var onOpen: (() -> Void)?
     var onSettings: (() -> Void)?
@@ -277,30 +278,22 @@ final class StatusLyricsView: NSView {
         lyricStack.translatesAutoresizingMaskIntoConstraints = false
         lyricStack.wantsLayer = true
         lyricStack.layer?.masksToBounds = true
-        controlsStack.orientation = .horizontal
-        controlsStack.alignment = .centerY
-        controlsStack.spacing = 4
-        controlsStack.distribution = .gravityAreas
-        controlsStack.translatesAutoresizingMaskIntoConstraints = false
         controlsStack.isHidden = true
-        controlsStack.addArrangedSubview(commandButton("backward.fill", help: "上一首", command: .previous))
-        controlsStack.addArrangedSubview(commandButton("playpause.fill", help: "播放/暂停", command: .playPause))
-        controlsStack.addArrangedSubview(commandButton("forward.fill", help: "下一首", command: .next))
+        controlsStack.addSubview(commandButton("backward.fill", help: "上一首", command: .previous))
+        controlsStack.addSubview(commandButton("playpause.fill", help: "播放/暂停", command: .playPause))
+        controlsStack.addSubview(commandButton("forward.fill", help: "下一首", command: .next))
         wantsLayer = true
         layer?.masksToBounds = true
         addSubview(lyricStack)
         addSubview(controlsStack)
         centerConstraint = lyricStack.centerXAnchor.constraint(equalTo: centerXAnchor)
-        controlsCenterConstraint = controlsStack.centerXAnchor.constraint(equalTo: lyricStack.centerXAnchor)
         NSLayoutConstraint.activate([
             lyricStack.widthAnchor.constraint(equalTo: widthAnchor),
             centerConstraint,
             lyricStack.topAnchor.constraint(equalTo: topAnchor),
             lyricStack.bottomAnchor.constraint(equalTo: bottomAnchor),
             primaryLabel.widthAnchor.constraint(equalTo: lyricStack.widthAnchor),
-            secondaryLabel.widthAnchor.constraint(equalTo: lyricStack.widthAnchor),
-            controlsCenterConstraint,
-            controlsStack.centerYAnchor.constraint(equalTo: centerYAnchor)
+            secondaryLabel.widthAnchor.constraint(equalTo: lyricStack.widthAnchor)
         ])
     }
 
@@ -328,9 +321,23 @@ final class StatusLyricsView: NSView {
         }
         primaryLabel.horizontalOffset = CGFloat(safeOffset)
         secondaryLabel.horizontalOffset = CGFloat(safeOffset)
-        controlsCenterConstraint.constant = CGFloat(safeOffset)
+        controlsOffset = CGFloat(safeOffset)
+        needsLayout = true
         let value: NSTextAlignment = alignment == .leading ? .left : alignment == .trailing ? .right : .center
         primaryLabel.alignment = value; secondaryLabel.alignment = value
+    }
+
+    override func layout() {
+        super.layout()
+        let width: CGFloat = 122
+        let height = min(20, bounds.height)
+        let slack = max(0, (bounds.width - width) / 2)
+        let offset = min(max(controlsOffset, -slack), slack)
+        controlsStack.frame = NSRect(x: (bounds.width - width) / 2 + offset,
+                                    y: (bounds.height - height) / 2, width: width, height: height)
+        for (index, control) in commandControls.enumerated() {
+            control.view.frame = NSRect(x: CGFloat(index) * 42, y: 0, width: 38, height: height)
+        }
     }
 
     private func animateLyricChange() {
@@ -377,9 +384,47 @@ final class StatusLyricsView: NSView {
         lyricStack.isHidden = false
     }
 
-    // NSStatusBarButton owns mouse tracking. Pass hits through to its native
-    // action, then use the cursor position to dispatch the displayed control.
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    // Receive real mouse events here: NSStatusBarButton's native tracking can
+    // synthesize a center click, which incorrectly targets play/pause.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        isHidden || !bounds.contains(convert(point, from: superview)) ? nil : self
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        layoutSubtreeIfNeeded()
+        pressStarted = true
+        pressedCommand = command(at: convert(event.locationInWindow, from: nil))
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        defer { pressStarted = false; pressedCommand = nil }
+        let point = convert(event.locationInWindow, from: nil)
+        guard pressStarted, bounds.contains(point) else { return }
+        layoutSubtreeIfNeeded()
+        // A lyric change can resize the status item during a click. Cancel
+        // rather than execute a different button under the release position.
+        guard command(at: point) == pressedCommand else { return }
+        activate(at: point)
+    }
+
+    override func rightMouseDown(with event: NSEvent) {}
+    override func rightMouseUp(with event: NSEvent) { onOpen?() }
+
+    static func preferredWidth(primary: String, secondary: String?, primarySize: Double,
+                               secondarySize: Double, maximumWidth: Double) -> CGFloat {
+        let primaryWidth = (primary as NSString).size(withAttributes: [
+            .font: NSFont.systemFont(ofSize: primarySize, weight: .semibold)
+        ]).width
+        let secondaryWidth = ((secondary ?? "") as NSString).size(withAttributes: [
+            .font: NSFont.systemFont(ofSize: secondarySize)
+        ]).width
+        // Keep all three 38pt controls plus their gaps and outer padding usable.
+        let minimum: CGFloat = 134
+        let limit = maximumWidth.isFinite ? min(max(CGFloat(maximumWidth), minimum), 700) : 240
+        return min(limit, max(minimum, ceil(max(primaryWidth, secondaryWidth)) + 22))
+    }
 
     var controlHitRegions: [(command: PlayerCommand, rect: NSRect)] {
         commandControls.map { ($0.command, $0.view.convert($0.view.bounds, to: self)) }
@@ -399,7 +444,7 @@ final class StatusLyricsView: NSView {
         let base = NSImage(systemSymbolName: symbol, accessibilityDescription: help) ?? NSImage()
         let configuration = NSImage.SymbolConfiguration(pointSize: 13, weight: .semibold).applying(.init(paletteColors: [.white]))
         let control = PlaybackControlView()
-        control.translatesAutoresizingMaskIntoConstraints = false
+        control.translatesAutoresizingMaskIntoConstraints = true
         control.image = base.withSymbolConfiguration(configuration) ?? base
         control.image?.isTemplate = false
         control.imageScaling = .scaleProportionallyDown
@@ -407,10 +452,6 @@ final class StatusLyricsView: NSView {
         control.setAccessibilityRole(.button)
         control.setAccessibilityLabel(help)
         control.onPress = { [weak self] in self?.onCommand?(command) }
-        NSLayoutConstraint.activate([
-            control.widthAnchor.constraint(equalToConstant: 38),
-            control.heightAnchor.constraint(equalToConstant: 20)
-        ])
         commandControls.append((command, control))
         return control
     }

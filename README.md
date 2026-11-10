@@ -68,6 +68,10 @@ CloudLyrics 不会自动启动播放器；请先打开网易云音乐或酷狗�
 
 卸载时退出 CloudLyrics 并将 `/Applications/CloudLyrics.app` 移到废纸篓。缓存位于 `~/Library/Caches/CloudLyrics`，设置位于 `~/Library/Preferences/io.github.hellomyonly55.CloudLyrics.plist`；如需彻底清理，请分别手动删除这些明确路径。
 
+歌词获取失败后会以 5、15、45、60 秒的间隔自动重试，手动「重新获取歌词」可立即重试。
+
+菜单栏宽度按当前可见歌词自动收缩；「最大宽度」限制长歌词的占用，超过后滚动显示。默认最大宽度为 240 pt。
+
 ### 歌词校准与电量
 
 右键菜单栏歌词或点击控制按钮外的空白区域打开设置。设置分为「外观」「歌词同步」「通用」，外观修改有实时预览，单排模式会隐藏次行选项。
@@ -177,7 +181,7 @@ To uninstall, quit CloudLyrics and move `/Applications/CloudLyrics.app` to Trash
 
 Right-click the menu-bar lyrics or click outside the playback buttons to open settings. Appearance, lyric synchronization, and general options have separate tabs, with a live appearance preview.
 
-Adjust each player's lyric lead in 0.1-second steps (±5 seconds). Positive values show lyrics earlier; negative values delay them. The default is +0.5 seconds. Calibration does not change playback position. Instrumental intros display a waiting message until the first timestamp. Refreshing lyrics bypasses the cache; mismatched recording versions can still cause timing errors.
+Adjust each player's lyric lead in 0.1-second steps (±5 seconds). Positive values show lyrics earlier; negative values delay them. The default is +0.5 seconds. Calibration does not change playback position. Instrumental intros display a waiting message until the first timestamp. Refreshing lyrics bypasses the cache; mismatched recording versions can still cause timing errors. Failed lookups retry after 5, 15, 45, then 60 seconds while the track remains selected.
 
 Balanced mode polls the player every 0.5 seconds (1 second in system Low Power Mode); Responsive uses 0.2 seconds and Energy Saving uses 1 second. Between polls, an in-memory clock schedules the next lyric boundary. Pause, seek, and track detection still depend on the next player state update. When no player is running, polling slows to every 3 seconds. Battery savings have not been benchmarked.
 

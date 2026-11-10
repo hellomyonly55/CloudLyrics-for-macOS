@@ -25,8 +25,12 @@ final class AppViewModel: ObservableObject {
     private var loadTask: Task<Void, Never>?
     private var currentKey: String?
     private var permissionRequested = false
+    private let now: () -> Date
+    private var lyricsRetryAttempt = 0
+    private var nextLyricsRetryAt: Date?
 
-    init(player: PlayerAdapter? = nil, providers: [LyricsProvider] = [KugouLocalLyricsProvider(), NetEaseLyricsProvider(), LRCLIBLyricsProvider()], settings: SettingsStore? = nil, automaticallyRefresh: Bool = true) {
+    init(player: PlayerAdapter? = nil, providers: [LyricsProvider] = [KugouLocalLyricsProvider(), NetEaseLyricsProvider(), LRCLIBLyricsProvider()], settings: SettingsStore? = nil, automaticallyRefresh: Bool = true, now: @escaping () -> Date = Date.init) {
+        self.now = now
         self.settings = settings ?? SettingsStoreReference.shared
         self.automaticallyRefresh = automaticallyRefresh
         self.player = player ?? AutomaticPlayerAdapter(); self.providers = providers
@@ -60,12 +64,17 @@ final class AppViewModel: ObservableObject {
         guard let track = snapshot.track else {
             if currentKey != nil { loadTask?.cancel() }
             currentKey = nil
+            nextLyricsRetryAt = nil
+            lyricsRetryAttempt = 0
             if document != nil { document = nil }
             if isLoading { isLoading = false }
             return
         }
         let key = track.normalizedKey
-        guard force || key != currentKey else { return }
+        let retryDue = !isLoading && document == nil && nextLyricsRetryAt.map { now() >= $0 } == true
+        guard force || key != currentKey || retryDue else { return }
+        if force || key != currentKey { lyricsRetryAttempt = 0 }
+        nextLyricsRetryAt = nil
         currentKey = key
         if document != nil { document = nil }
         if !isLoading { isLoading = true }
@@ -106,6 +115,9 @@ final class AppViewModel: ObservableObject {
                 setMessage("")
             } else {
                 setMessage("暂无歌词")
+                let delays: [TimeInterval] = [5, 15, 45, 60]
+                nextLyricsRetryAt = now().addingTimeInterval(delays[min(lyricsRetryAttempt, delays.count - 1)])
+                lyricsRetryAttempt = min(lyricsRetryAttempt + 1, delays.count - 1)
             }
             if isLoading { isLoading = false }
         }

@@ -1,8 +1,56 @@
+import AppKit
 import XCTest
 @testable import CloudLyrics
 
 @MainActor
 final class PlayerAdapterTests: XCTestCase {
+    func testNavigationUsesPlayerMenuEvenWhenSystemDispatchWouldSucceed() throws {
+        for command in [PlayerCommand.previous, .next] {
+            var remoteCalls = 0
+            var menuCalls = 0
+            try PlayerCommandRouter.perform(command, mediaRemote: {
+                remoteCalls += 1
+                return true
+            }, accessibility: { menuCalls += 1 })
+            XCTAssertEqual(remoteCalls, 0)
+            XCTAssertEqual(menuCalls, 1)
+        }
+    }
+
+    func testNavigationReportsPermissionFailureWithoutSystemFallback() {
+        for command in [PlayerCommand.previous, .next] {
+            XCTAssertThrowsError(try PlayerCommandRouter.perform(command, mediaRemote: {
+                XCTFail("Track navigation must not send a global media command")
+                return true
+            }, accessibility: { throw AXPlayerError.permissionRequired })) { error in
+                guard case AXPlayerError.permissionRequired = error else {
+                    return XCTFail("Unexpected error: \(error)")
+                }
+            }
+        }
+    }
+
+    func testPlayPauseUsesSystemDispatchWithMenuFallback() throws {
+        for accepted in [true, false] {
+            var menuCalls = 0
+            try PlayerCommandRouter.perform(.playPause, mediaRemote: { accepted },
+                                            accessibility: { menuCalls += 1 })
+            XCTAssertEqual(menuCalls, accepted ? 0 : 1)
+        }
+    }
+
+    func testRegistryRefreshesWithoutWorkspaceLaunchOrTerminationNotifications() throws {
+        var applications: [NSRunningApplication] = []
+        let registry = PlayerApplicationRegistry(lookup: { _ in applications })
+        XCTAssertTrue(registry.processIdentifiers(for: PlayerBundleIdentifiers.netease).isEmpty)
+        applications = [try XCTUnwrap(NSWorkspace.shared.runningApplications.first { !$0.isTerminated })]
+        XCTAssertEqual(registry.processIdentifiers(for: PlayerBundleIdentifiers.netease),
+                       [applications[0].processIdentifier])
+        XCTAssertEqual(registry.runningApplications(for: PlayerBundleIdentifiers.netease).count, 1)
+        applications = []
+        XCTAssertTrue(registry.processIdentifiers(for: PlayerBundleIdentifiers.netease).isEmpty)
+    }
+
     func testPlayerProcessStateTracksLaunchesAndTerminations() {
         var state = PlayerProcessState()
         state.applicationLaunched(bundleIdentifier: PlayerBundleIdentifiers.kugou, processIdentifier: 42)
