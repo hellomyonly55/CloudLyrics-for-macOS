@@ -25,46 +25,22 @@ struct PlayerProcessState: Equatable {
 
 @MainActor
 final class PlayerApplicationRegistry {
-    private let workspace: NSWorkspace
-    private var state = PlayerProcessState()
-    private var observers: [NSObjectProtocol] = []
+    private let lookup: (String) -> [NSRunningApplication]
 
-    init(workspace: NSWorkspace = .shared) {
-        self.workspace = workspace
-        for bundleIdentifier in [PlayerBundleIdentifiers.netease, PlayerBundleIdentifiers.kugou] {
-            for application in NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier) {
-                state.applicationLaunched(bundleIdentifier: bundleIdentifier, processIdentifier: application.processIdentifier)
-            }
-        }
-        let center = workspace.notificationCenter
-        observers.append(center.addObserver(forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main) { [weak self] notification in
-            guard let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
-            Task { @MainActor in self?.recordLaunch(application) }
-        })
-        observers.append(center.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main) { [weak self] notification in
-            guard let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
-            Task { @MainActor in self?.recordTermination(application) }
-        })
+    init(lookup: @escaping (String) -> [NSRunningApplication] = {
+        NSRunningApplication.runningApplications(withBundleIdentifier: $0)
+    }) {
+        self.lookup = lookup
     }
 
-    deinit {
-        for observer in observers { workspace.notificationCenter.removeObserver(observer) }
+    func processIdentifiers(for bundleIdentifier: String) -> [pid_t] {
+        runningApplications(for: bundleIdentifier).map(\.processIdentifier).sorted()
     }
-
-    func processIdentifiers(for bundleIdentifier: String) -> [pid_t] { state.identifiers(for: bundleIdentifier) }
 
     func runningApplications(for bundleIdentifier: String) -> [NSRunningApplication] {
-        processIdentifiers(for: bundleIdentifier).compactMap(NSRunningApplication.init(processIdentifier:))
-    }
-
-    private func recordLaunch(_ application: NSRunningApplication) {
-        guard let bundleIdentifier = application.bundleIdentifier else { return }
-        state.applicationLaunched(bundleIdentifier: bundleIdentifier, processIdentifier: application.processIdentifier)
-    }
-
-    private func recordTermination(_ application: NSRunningApplication) {
-        guard let bundleIdentifier = application.bundleIdentifier else { return }
-        state.applicationTerminated(bundleIdentifier: bundleIdentifier, processIdentifier: application.processIdentifier)
+        // Query live state so missed/delayed workspace notifications, launches
+        // during initialization and relaunches cannot leave the registry stale.
+        lookup(bundleIdentifier).filter { !$0.isTerminated }
     }
 }
 
@@ -315,8 +291,17 @@ final class KugouPlayerAdapter: PlayerAdapter {
 
     func perform(_ command: PlayerCommand) throws {
         guard let processIdentifier = applications.processIdentifiers(for: Self.bundleIdentifier).first else { throw AXPlayerError.notRunning }
-        if bridge.perform(command, expectedBundleIdentifier: Self.bundleIdentifier) { return }
-        guard accessibility.perform(command, processIdentifier: processIdentifier) else { throw AXPlayerError.controlUnavailable }
+        try PlayerCommandRouter.perform(command, mediaRemote: {
+            bridge.perform(command, expectedBundleIdentifier: Self.bundleIdentifier)
+        }, accessibility: {
+            guard accessibility.isTrusted else {
+                accessibility.requestPermission()
+                throw AXPlayerError.permissionRequired
+            }
+            guard accessibility.perform(command, processIdentifier: processIdentifier) else {
+                throw AXPlayerError.controlUnavailable
+            }
+        })
     }
 
     func requestPermission() { accessibility.requestPermission() }

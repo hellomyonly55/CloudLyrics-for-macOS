@@ -166,7 +166,7 @@ struct AppearanceSettings: Codable, Equatable {
     var primarySize = 10.0
     var secondarySize = 8.0
     var lineSpacing = -1.0
-    var width = 360.0
+    var width = 240.0
     var horizontalOffset = 0.0
     var alignment: LyricsAlignment = .center
 

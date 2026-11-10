@@ -149,7 +149,7 @@ struct SettingsView: View {
                     }
                 }
                 Section("菜单栏布局") {
-                    slider("占用宽度", value: binding(\.width), range: 200...700, suffix: "pt")
+                    slider("最大宽度", value: binding(\.width), range: 134...700, suffix: "pt")
                     Picker("对齐方式", selection: binding(\.alignment)) {
                         ForEach(LyricsAlignment.allCases) { Text($0.label).tag($0) }
                     }

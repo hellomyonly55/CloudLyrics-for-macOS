@@ -4,6 +4,16 @@ All notable changes to CloudLyrics are documented in this file.
 
 ## Unreleased
 
+## [1.0.1] - 2026-11-10
+
+### Fixed
+
+- Size the menu-bar item to visible lyric text instead of always reserving the configured maximum; new installations default to a 240 pt maximum.
+- Receive playback button clicks directly and keep three distinct control regions within the compact item. Cancel clicks that move to a different control before release.
+- Route previous/next exclusively through the selected player's Accessibility menu; report missing permission instead of falling back to global MediaRemote navigation. Incorporates the navigation policy proposed in #4.
+- Read the current running application list instead of depending on workspace launch/termination notifications.
+- Retry failed lyrics lookups for the same track with a 5/15/45/60-second backoff; manual refresh still retries immediately.
+
 ## [1.0.0] - 2026-10-24
 
 ### Added

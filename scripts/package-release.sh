@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="${0:A:h:h}"
-VERSION="${1:-1.0.0}"
+VERSION="${1:-1.0.1}"
 IDENTIFIER="io.github.hellomyonly55.CloudLyrics"
 OUTPUT_DIR="$ROOT/.build/releases"
 STAGING_DIR="${TMPDIR%/}/CloudLyrics-release/$VERSION-$(date +%Y%m%d%H%M%S)-$$"
